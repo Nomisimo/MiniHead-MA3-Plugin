@@ -35,6 +35,14 @@ local pluginName, componentName, signalTable, myHandle =
 -- SECTION 1: Small utilities
 -- ============================================================================
 
+-- `val or fallback` doesn't catch an empty string (only nil/false) - the
+-- firmware often reports "" rather than omitting a field, so every display
+-- fallback in this file goes through this instead.
+local function nz(val, fallback)
+  if val == nil or val == "" then return fallback end
+  return val
+end
+
 local function tokenize(arg)
   local tokens = {}
   for tok in tostring(arg or ""):gmatch("%S+") do
@@ -349,8 +357,8 @@ local function renderHeadsTable()
       ua = h.universe .. "." .. string.format("%03d", h.addr)
     end
     Printf(string.format("  %-3s %-15s %-16s %-5s %-9s %-8s",
-      status, h.ip or "-", h.name or "-",
-      tostring(h.fixtureNo or "-"), ua, h.role or "-"))
+      status, nz(h.ip, "-"), nz(h.name, "-"),
+      tostring(h.fixtureNo or "-"), ua, nz(h.role, "-")))
   end
 end
 
@@ -498,6 +506,12 @@ end
 
 function api.rainbowAll(ip, on)
   local ok, code, _, err = httpRequest(ip, "POST", "/api/rainbow", { on = on }, 1500)
+  return ok and code == 200, err or ("HTTP " .. tostring(code))
+end
+
+-- Distinct from Rainbow: firmware's own sinusoid demo animation.
+function api.demoAll(ip, on)
+  local ok, code, _, err = httpRequest(ip, "POST", "/api/demo", { on = on }, 1500)
   return ok and code == 200, err or ("HTTP " .. tostring(code))
 end
 
@@ -822,6 +836,17 @@ local function doRainbowAll(on)
   end
 end
 
+local function doDemoAll(on)
+  local ip = anyReachableIp()
+  if not ip then notifyInfo("No heads known yet."); return end
+  local ok, err = api.demoAll(ip, on)
+  if ok then
+    notifyInfo("Demo animation " .. (on and "started" or "stopped") .. " (all heads).")
+  else
+    notifyError("Demo command failed via " .. ip .. " [" .. tostring(err) .. "]. Try Refresh.")
+  end
+end
+
 local function doBatch(rangeArg)
   local fixtureNumbers
   if rangeArg and rangeArg ~= "" then
@@ -844,7 +869,7 @@ local function doBatch(rangeArg)
 
   notifyInfo("Batch preview (" .. n .. " pair(s), matched by IP order):")
   for i = 1, n do
-    Printf("  Fixture " .. fixtureNumbers[i] .. "  <->  " .. heads[i].ip .. " (" .. (heads[i].name or "?") .. ")")
+    Printf("  Fixture " .. fixtureNumbers[i] .. "  <->  " .. heads[i].ip .. " (" .. nz(heads[i].name, "?") .. ")")
   end
   if #fixtureNumbers ~= #heads then
     notifyInfo("Note: " .. #fixtureNumbers .. " fixture(s) selected but " .. #heads .. " head(s) known - matching the first " .. n .. ".")
@@ -934,7 +959,8 @@ local function doHelp()
     "  Identify <ip>               - flash one head",
     "  IdentifyAll                 - flash all heads",
     "  BlackoutAll                 - blackout all heads",
-    "  RainbowAll / RainbowOff     - start/stop rainbow demo on all heads",
+    "  RainbowAll / RainbowOff     - start/stop rainbow hue-cycle on all heads",
+    "  DemoAll / DemoOff           - start/stop the sinusoid demo animation on all heads",
     "  Batch [range]               - batch-link+apply an MA3 selection (or typed range), matched by IP order",
     "  Rename <ip>                 - write the head's name onto its linked MA3 fixture (confirms every time)",
     "  NetworkSettings              - open MA3's Art-Net Connector Configuration menu",
@@ -968,12 +994,12 @@ doEditHead = function(ip)
     ua = head.universe .. "." .. string.format("%03d", head.addr)
   end
   local msg = "IP: " .. head.ip .. "\n" ..
-    "MAC: " .. ((head.mac and head.mac ~= "") and head.mac or "-") .. "\n" ..
-    "Role: " .. (head.role or "-") .. "   Status: " .. (head.online and "Online" or "Offline") .. "\n" ..
+    "MAC: " .. nz(head.mac, "-") .. "\n" ..
+    "Role: " .. nz(head.role, "-") .. "   Status: " .. (head.online and "Online" or "Offline") .. "\n" ..
     "Last applied patch: " .. ua
 
   local result = MessageBox({
-    title = "MiniHead - " .. (head.name or head.ip),
+    title = "MiniHead - " .. nz(head.name, head.ip),
     message = msg,
     inputs = { { name = "Fix#", value = tostring(head.fixtureNo or "") } },
     commands = {
@@ -1016,7 +1042,7 @@ doMenu = function()
     local lines = {}
     for _, h in ipairs(heads) do
       lines[#lines + 1] = string.format("%s  %-15s  Fix#%-4s  %s",
-        h.online and "On " or "Off", h.ip, tostring(h.fixtureNo or "-"), h.name or "-")
+        h.online and "On " or "Off", h.ip, tostring(h.fixtureNo or "-"), nz(h.name, "-"))
     end
     msg = table.concat(lines, "\n")
   end
@@ -1027,6 +1053,7 @@ doMenu = function()
     { value = 3, name = "Identify All" },
     { value = 4, name = "Blackout All" },
     { value = 5, name = "Rainbow All" },
+    { value = 7, name = "Demo All" },
     { value = 6, name = "Settings" },
   }
   local ipByValue = {}
@@ -1049,6 +1076,7 @@ doMenu = function()
   elseif r == 3 then doIdentifyAll(); return doMenu()
   elseif r == 4 then doBlackoutAll(); return doMenu()
   elseif r == 5 then doRainbowAll(true); return doMenu()
+  elseif r == 7 then doDemoAll(true); return doMenu()
   elseif r == 6 then doSettings(); return doMenu()
   elseif ipByValue[r] then return doEditHead(ipByValue[r])
   end
@@ -1086,7 +1114,7 @@ local function doWindow()
 
     local baseLayer = GetFocusDisplay().ScreenOverlay:Append('BaseInput')
     baseLayer.H = 560
-    baseLayer.W = 920
+    baseLayer.W = 940
     baseLayer.Columns = 1
     baseLayer.Rows = 5
     baseLayer[1][1].SizePolicy = 'Fixed'; baseLayer[1][1].Size = 36  -- title bar
@@ -1119,11 +1147,18 @@ local function doWindow()
     titleClose.PluginComponent = myHandle
     titleClose.Clicked = 'MH_CloseClicked'
 
-    -- Header actions: Discover / Refresh / Settings
+    -- Header actions: Discover / Refresh / Settings - fixed-width buttons
+    -- left-aligned, trailing column stretches to absorb the rest (rather
+    -- than 3 equal-stretch columns spreading the buttons across the full
+    -- window width).
     local headerGrid = baseLayer:Append('UILayoutGrid')
     headerGrid.Anchors = '0,1'
-    headerGrid.Columns = 3
+    headerGrid.Columns = 4
     headerGrid.Rows = 1
+    headerGrid[1][1].SizePolicy = 'Fixed'; headerGrid[1][1].Size = 160
+    headerGrid[2][1].SizePolicy = 'Fixed'; headerGrid[2][1].Size = 110
+    headerGrid[3][1].SizePolicy = 'Fixed'; headerGrid[3][1].Size = 110
+    headerGrid[4][1].SizePolicy = 'Stretch'
 
     local discoverBtn = headerGrid:Append('Button')
     discoverBtn.Anchors = '0,0'
@@ -1164,37 +1199,72 @@ local function doWindow()
     local COLOR_ON = 'Global.Text'
     local COLOR_OFF = 'Global.Inactive'
 
+    -- Column header labels (row 0), data rows start one rowH below.
+    local headerCols = {
+      { x = 5,   w = 35,  t = 'St' },
+      { x = 45,  w = 135, t = 'IP' },
+      { x = 185, w = 130, t = 'MAC' },
+      { x = 320, w = 140, t = 'Name' },
+      { x = 465, w = 55,  t = 'Fix#' },
+      { x = 525, w = 65,  t = 'U.Addr' },
+      { x = 595, w = 75,  t = 'Role' },
+    }
+    for _, c in ipairs(headerCols) do
+      local hdr = scrollbox:Append('Button')
+      hdr.Text = c.t
+      hdr.HasHover = 'No'
+      hdr.TextColor = 'Global.Inactive'
+      hdr.Font = 'Regular12'
+      hdr.TextalignmentH = 'Left'
+      hdr.W, hdr.H = c.w, rowH - 8
+      hdr.X, hdr.Y = c.x, 0
+    end
+
     for i, h in ipairs(heads) do
-      local y = (i - 1) * rowH
+      local y = i * rowH
       local rowColor = h.online and COLOR_ON or COLOR_OFF
 
       local statusLbl = scrollbox:Append('Button')
       statusLbl.Text = h.online and 'On' or 'Off'
       statusLbl.HasHover = 'No'
       statusLbl.TextColor = rowColor
-      statusLbl.W, statusLbl.H = 40, rowH - 4
+      statusLbl.W, statusLbl.H = 35, rowH - 4
       statusLbl.X, statusLbl.Y = 5, y
 
       local ipLbl = scrollbox:Append('Button')
-      ipLbl.Text = h.ip or '-'
+      ipLbl.Text = nz(h.ip, '-')
       ipLbl.HasHover = 'No'
       ipLbl.TextColor = rowColor
       ipLbl.TextalignmentH = 'Left'
-      ipLbl.W, ipLbl.H = 150, rowH - 4
-      ipLbl.X, ipLbl.Y = 50, y
+      ipLbl.W, ipLbl.H = 135, rowH - 4
+      ipLbl.X, ipLbl.Y = 45, y
+
+      local macLbl = scrollbox:Append('Button')
+      macLbl.Text = nz(h.mac, '-')
+      macLbl.HasHover = 'No'
+      macLbl.TextColor = rowColor
+      macLbl.TextalignmentH = 'Left'
+      macLbl.Font = 'Regular12'
+      macLbl.W, macLbl.H = 130, rowH - 4
+      macLbl.X, macLbl.Y = 185, y
 
       local nameLbl = scrollbox:Append('Button')
-      nameLbl.Text = h.name or '-'
+      nameLbl.Text = nz(h.name, '-')
       nameLbl.HasHover = 'No'
       nameLbl.TextColor = rowColor
       nameLbl.TextalignmentH = 'Left'
-      nameLbl.W, nameLbl.H = 180, rowH - 4
-      nameLbl.X, nameLbl.Y = 205, y
+      nameLbl.W, nameLbl.H = 140, rowH - 4
+      nameLbl.X, nameLbl.Y = 320, y
 
+      -- Fix#: empty LineEdit renders as a bare keyboard glyph on this build
+      -- until it has content or focus - expected for an unset fixtureNo,
+      -- not a bug. Font set explicitly so an entered number stays legible.
       local fixInput = scrollbox:Append('LineEdit')
       fixInput.Text = tostring(h.fixtureNo or '')
-      fixInput.W, fixInput.H = 60, rowH - 4
-      fixInput.X, fixInput.Y = 390, y
+      fixInput.Font = 'Regular16'
+      fixInput.TextalignmentH = 'Centre'
+      fixInput.W, fixInput.H = 55, rowH - 4
+      fixInput.X, fixInput.Y = 465, y
       fixInputs[i] = fixInput
 
       local uaddrText = '--'
@@ -1203,29 +1273,29 @@ local function doWindow()
       uaddrLbl.Text = uaddrText
       uaddrLbl.HasHover = 'No'
       uaddrLbl.TextColor = rowColor
-      uaddrLbl.W, uaddrLbl.H = 70, rowH - 4
-      uaddrLbl.X, uaddrLbl.Y = 455, y
+      uaddrLbl.W, uaddrLbl.H = 65, rowH - 4
+      uaddrLbl.X, uaddrLbl.Y = 525, y
 
       local roleLbl = scrollbox:Append('Button')
-      roleLbl.Text = h.role or '-'
+      roleLbl.Text = nz(h.role, '-')
       roleLbl.HasHover = 'No'
       roleLbl.TextColor = rowColor
-      roleLbl.W, roleLbl.H = 80, rowH - 4
-      roleLbl.X, roleLbl.Y = 530, y
+      roleLbl.W, roleLbl.H = 75, rowH - 4
+      roleLbl.X, roleLbl.Y = 595, y
 
       local idBtn = scrollbox:Append('Button')
       idBtn.Text = 'Identify'
       idBtn.HasHover = 'Yes'
-      idBtn.W, idBtn.H = 90, rowH - 4
-      idBtn.X, idBtn.Y = 615, y
+      idBtn.W, idBtn.H = 85, rowH - 4
+      idBtn.X, idBtn.Y = 675, y
       idBtn.PluginComponent = myHandle
       idBtn.Clicked = 'MH_Identify' .. i
 
       local applyBtn = scrollbox:Append('Button')
       applyBtn.Text = 'Apply'
       applyBtn.HasHover = 'Yes'
-      applyBtn.W, applyBtn.H = 90, rowH - 4
-      applyBtn.X, applyBtn.Y = 710, y
+      applyBtn.W, applyBtn.H = 85, rowH - 4
+      applyBtn.X, applyBtn.Y = 765, y
       applyBtn.PluginComponent = myHandle
       applyBtn.Clicked = 'MH_Apply' .. i
 
@@ -1245,7 +1315,7 @@ local function doWindow()
     -- Global actions: Identify All / Blackout All / Rainbow Demo
     local globalGrid = baseLayer:Append('UILayoutGrid')
     globalGrid.Anchors = '0,3'
-    globalGrid.Columns = 3
+    globalGrid.Columns = 4
     globalGrid.Rows = 1
 
     local idAllBtn = globalGrid:Append('Button')
@@ -1264,10 +1334,17 @@ local function doWindow()
 
     local rbAllBtn = globalGrid:Append('Button')
     rbAllBtn.Anchors = '2,0'
-    rbAllBtn.Text = 'Rainbow Demo'
+    rbAllBtn.Text = 'Rainbow'
     rbAllBtn.HasHover = 'Yes'
     rbAllBtn.PluginComponent = myHandle
     rbAllBtn.Clicked = 'MH_RainbowAllClicked'
+
+    local demoAllBtn = globalGrid:Append('Button')
+    demoAllBtn.Anchors = '3,0'
+    demoAllBtn.Text = 'Demo'
+    demoAllBtn.HasHover = 'Yes'
+    demoAllBtn.PluginComponent = myHandle
+    demoAllBtn.Clicked = 'MH_DemoAllClicked'
 
     -- Footer: Network settings
     local footerGrid = baseLayer:Append('UILayoutGrid')
@@ -1293,6 +1370,7 @@ local function doWindow()
     signalTable.MH_IdentifyAllClicked = function(caller) doIdentifyAll() end
     signalTable.MH_BlackoutAllClicked = function(caller) doBlackoutAll() end
     signalTable.MH_RainbowAllClicked = function(caller) doRainbowAll(true) end
+    signalTable.MH_DemoAllClicked = function(caller) doDemoAll(true) end
     signalTable.MH_NetworkSettingsClicked = function(caller) Cmd('Menu "ConnectorConfig"') end
 
   end)
@@ -1343,6 +1421,8 @@ function Main(display_handle, arg)
   elseif cmd == "blackoutall" then doBlackoutAll()
   elseif cmd == "rainbowall" then doRainbowAll(true)
   elseif cmd == "rainbowoff" then doRainbowAll(false)
+  elseif cmd == "demoall" then doDemoAll(true)
+  elseif cmd == "demooff" then doDemoAll(false)
   elseif cmd == "batch" then doBatch(table.concat(tokens, " "))
   elseif cmd == "rename" then doRename(tokens[1])
   elseif cmd == "networksettings" then Cmd('Menu "ConnectorConfig"')
