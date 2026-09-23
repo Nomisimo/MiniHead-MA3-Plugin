@@ -770,16 +770,21 @@ local function doApply(ip)
     return
   end
 
-  -- Name pushes independently of fixture/patch status - editable even on
-  -- a head with no linked fixture yet.
+  -- Each of name / fixID / patch pushes independently and reports its own
+  -- failure - one failing must not silently block the others (a name-push
+  -- failure used to return early and skip fixID+patch entirely).
   if head.name and head.name ~= "" then
     local okName, nameErr = api.setName(head.ip, head.name)
-    if not okName then
-      notifyError("Failed to set name on " .. head.ip .. " [" .. tostring(nameErr) .. "].")
-      return
+    if okName then
+      notifyInfo("Name pushed to " .. head.ip .. ": \"" .. head.name .. "\"")
+    else
+      notifyError("Name push failed on " .. head.ip .. " [" .. tostring(nameErr) .. "] - continuing with fixID/patch.")
     end
   end
 
+  -- Only ever pushes an address that MA3 itself reports as patched under
+  -- this Fix# - never invented/computed. If MA3 has no patch there, the
+  -- only choice is fixID-only or cancel.
   local universe, addr = nil, nil
   if head.fixtureNo then
     universe, addr = ma3ReadPatch(head.fixtureNo)
@@ -796,24 +801,21 @@ local function doApply(ip)
 
   local okId, idErr = api.setFixID(head.ip, head.fixtureNo or 0)
   if not okId then
-    notifyError("Failed to set fixture ID on " .. head.ip .. " [" .. tostring(idErr) .. "].")
-    return
+    notifyError("Fixture ID push failed on " .. head.ip .. " [" .. tostring(idErr) .. "].")
+  else
+    notifyInfo("Fixture ID pushed to " .. head.ip .. ": " .. tostring(head.fixtureNo or 0))
   end
 
   if universe and addr then
     local okPatch, code, patchErr = api.setPatch(head.ip, universe, addr)
-    if not okPatch then
-      notifyError("Fixture ID set, but patch push failed on " .. head.ip ..
+    if okPatch then
+      head.universe, head.addr = universe, addr
+      notifyInfo("Patch pushed to " .. head.ip .. ": " .. universe .. "." .. string.format("%03d", addr))
+    else
+      notifyError("Patch push failed on " .. head.ip ..
         " [" .. tostring(patchErr or code) .. "]. If this is HTTP 404, confirm the head's firmware has Art-Net (PLUGIN_ARTNET) enabled.")
       head.universe, head.addr = nil, nil
-      saveHeads(heads)
-      return
     end
-    head.universe, head.addr = universe, addr
-    notifyInfo("Applied to " .. head.ip .. ": Fix#=" .. tostring(head.fixtureNo) ..
-      ", patch=" .. universe .. "." .. string.format("%03d", addr))
-  else
-    notifyInfo("Applied to " .. head.ip .. ": Fix#=" .. tostring(head.fixtureNo) .. " (no patch pushed).")
   end
 
   saveHeads(heads)
