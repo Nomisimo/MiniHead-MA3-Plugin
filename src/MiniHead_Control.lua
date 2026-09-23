@@ -272,7 +272,7 @@ local function defaultSettings()
     pollInterval = 20,   -- seconds; informational, used by your Refresh macro timer
     toastEnabled = true,
     cmdlineLogEnabled = true,
-    scanRadius = 20,      -- +/- host addresses probed around the seed IP on Discover
+    scanRadius = 8,       -- +/- host addresses probed around the seed IP on Discover
   }
 end
 
@@ -457,8 +457,11 @@ end
 
 local api = {}
 
-function api.getStatus(ip)
-  local ok, code, body, err = httpRequest(ip, "GET", "/api/status", nil, 800)
+-- timeoutMs defaults to 800 for a real probe; the subnet scan passes a much
+-- shorter one since it's hitting mostly-empty addresses sequentially and
+-- every extra millisecond there is felt directly as UI blocking.
+function api.getStatus(ip, timeoutMs)
+  local ok, code, body, err = httpRequest(ip, "GET", "/api/status", nil, timeoutMs or 800)
   if ok and code == 200 then
     return true, json.decode(body)
   end
@@ -608,7 +611,9 @@ local function subnetProbe(seedIp, radius, knownHeads)
     if i ~= d then
       local ip = a .. "." .. b .. "." .. c .. "." .. i
       if not known[ip] then
-        local ok = api.getStatus(ip)
+        -- Short timeout: this runs sequentially and blocks the UI for its
+        -- duration - up to 2*radius probes, so every ms here counts.
+        local ok = api.getStatus(ip, 150)
         if ok then found[#found + 1] = ip end
       end
     end
@@ -617,6 +622,13 @@ local function subnetProbe(seedIp, radius, knownHeads)
 end
 
 local function doDiscover(seedIp)
+  -- Reuse the last known seed IP before prompting - "Discover Heads" in the
+  -- Window was re-prompting via TextInput every time, whose modal popup
+  -- behind the still-open window looked like onPC hanging.
+  if not seedIp or seedIp == "" then
+    local existingSettings = loadSettings()
+    seedIp = existingSettings.seedIP
+  end
   if not seedIp or seedIp == "" then
     seedIp = promptText("MiniHead - Enter a head's IP address", "192.168.1.")
   end
@@ -1180,10 +1192,11 @@ doWindow = function()
     -- the edge, which is what the bottom action row was doing.
     pcall(function() baseLayer.DefaultMargin = 8 end)
     pcall(function() baseLayer.DefaultMarginOnBorders = 'Yes' end)
-    -- "Window.Plugins" confirmed from MA Lighting's own documented
-    -- MessageBox() example (backColor = "Window.Plugins") - a safe,
-    -- thematically-fitting accent instead of the plain default.
-    tryColor(baseLayer, 'BackColor', 'Window.Plugins')
+    -- NOTE: tinting the whole window's BackColor ("Window.Plugins") turned
+    -- the entire window a flat, overwhelming pink - reverted. Per the HTML
+    -- mockup's actual palette, color belongs on small accents (button text,
+    -- the status dot) against a neutral dark body, not as a full-surface
+    -- wash. Left baseLayer at its default background.
 
     -- Title bar
     local titleBar = baseLayer:Append('TitleBar')
@@ -1287,6 +1300,7 @@ doWindow = function()
       statusLbl.Text = h.online and 'On' or 'Off'
       statusLbl.HasHover = 'No'
       statusLbl.TextColor = rowColor
+      tryColor(statusLbl, 'TextColor', h.online and 'Global.Green' or 'Global.Inactive')
       statusLbl.W, statusLbl.H = 35, rowH - 4
       statusLbl.X, statusLbl.Y = 5, y
 
@@ -1348,7 +1362,7 @@ doWindow = function()
       idBtn.HasHover = 'Yes'
       idBtn.W, idBtn.H = 85, rowH - 4
       idBtn.X, idBtn.Y = 675, y
-      tryColor(idBtn, 'BackColor', 'Global.Blue')
+      tryColor(idBtn, 'TextColor', 'Global.Blue')
       idBtn.PluginComponent = myHandle
       idBtn.Clicked = 'MH_Identify' .. i
 
@@ -1357,7 +1371,7 @@ doWindow = function()
       applyBtn.HasHover = 'Yes'
       applyBtn.W, applyBtn.H = 85, rowH - 4
       applyBtn.X, applyBtn.Y = 765, y
-      tryColor(applyBtn, 'BackColor', 'Global.Green')
+      tryColor(applyBtn, 'TextColor', 'Global.Green')
       applyBtn.PluginComponent = myHandle
       applyBtn.Clicked = 'MH_Apply' .. i
 
@@ -1413,7 +1427,7 @@ doWindow = function()
     boAllBtn.Anchors = '1,0'
     boAllBtn.Text = 'Blackout All'
     boAllBtn.HasHover = 'Yes'
-    tryColor(boAllBtn, 'BackColor', 'Global.Red')
+    tryColor(boAllBtn, 'TextColor', 'Global.Red')
     boAllBtn.PluginComponent = myHandle
     boAllBtn.Clicked = 'MH_BlackoutAllClicked'
 
@@ -1421,7 +1435,7 @@ doWindow = function()
     rbAllBtn.Anchors = '2,0'
     rbAllBtn.Text = 'Rainbow'
     rbAllBtn.HasHover = 'Yes'
-    tryColor(rbAllBtn, 'BackColor', 'Global.Magenta')
+    tryColor(rbAllBtn, 'TextColor', 'Global.Magenta')
     rbAllBtn.PluginComponent = myHandle
     rbAllBtn.Clicked = 'MH_RainbowAllClicked'
 
@@ -1429,7 +1443,7 @@ doWindow = function()
     demoAllBtn.Anchors = '3,0'
     demoAllBtn.Text = 'Demo'
     demoAllBtn.HasHover = 'Yes'
-    tryColor(demoAllBtn, 'BackColor', 'Global.Yellow')
+    tryColor(demoAllBtn, 'TextColor', 'Global.Yellow')
     demoAllBtn.PluginComponent = myHandle
     demoAllBtn.Clicked = 'MH_DemoAllClicked'
 
