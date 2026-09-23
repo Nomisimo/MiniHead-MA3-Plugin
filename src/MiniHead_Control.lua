@@ -1198,6 +1198,14 @@ doWindow = function()
       pcall(function() obj[prop] = colorName end)
     end
 
+    -- Ground truth (from shared/resource/textures/graphics.textures.xml and
+    -- shared/resource/lib_color_themes/default.xml in the grandMA3 install,
+    -- not guessed): 'cornerN' Border="L,T,R,B" - nonzero L+T=top-left,
+    -- T+R=top-right, L+B=bottom-left (corner4), R+B=bottom-right (corner8).
+    -- Color refs use the ColorGroup layer, e.g. 'Global.SuccessText' /
+    -- 'Global.AlertText' / 'Global.WarningText' - NOT the raw ColorDef
+    -- names like 'Global.Success' or ad-hoc ones like 'Global.Green'.
+
     local baseLayer = GetFocusDisplay().ScreenOverlay:Append('BaseInput')
     baseLayer.H = 570
     baseLayer.W = 940
@@ -1324,7 +1332,7 @@ doWindow = function()
       statusLbl.Text = h.online and 'On' or 'Off'
       statusLbl.HasHover = 'No'
       statusLbl.TextColor = rowColor
-      tryColor(statusLbl, 'TextColor', h.online and 'Global.Green' or 'Global.Red')
+      tryColor(statusLbl, 'TextColor', h.online and 'Global.SuccessText' or 'Global.AlertText')
       statusLbl.W, statusLbl.H = 35, rowH - 4
       statusLbl.X, statusLbl.Y = 5, y
 
@@ -1395,7 +1403,7 @@ doWindow = function()
       editBtn.HasHover = 'Yes'
       editBtn.W, editBtn.H = 85, rowH - 4
       editBtn.X, editBtn.Y = 765, y
-      tryColor(editBtn, 'TextColor', 'Global.Green')
+      tryColor(editBtn, 'TextColor', 'Global.SuccessText')
       editBtn.PluginComponent = myHandle
       editBtn.Clicked = 'MH_Edit' .. i
 
@@ -1472,7 +1480,7 @@ doWindow = function()
     boAllBtn.Anchors = '1,0'
     boAllBtn.Text = 'Blackout All'
     boAllBtn.HasHover = 'Yes'
-    tryColor(boAllBtn, 'TextColor', 'Global.Red')
+    tryColor(boAllBtn, 'TextColor', 'Global.AlertText')
     boAllBtn.PluginComponent = myHandle
     boAllBtn.Clicked = 'MH_BlackoutAllClicked'
 
@@ -1480,7 +1488,9 @@ doWindow = function()
     rbAllBtn.Anchors = '2,0'
     rbAllBtn.Text = 'Rainbow'
     rbAllBtn.HasHover = 'Yes'
-    tryColor(rbAllBtn, 'TextColor', 'Global.Magenta')
+    -- No real "magenta/accent" semantic color exists in grandMA3's Global
+    -- ColorGroup (confirmed by reading the shipped color theme XML) - left
+    -- as the plain default button color rather than another silent no-op guess.
     rbAllBtn.PluginComponent = myHandle
     rbAllBtn.Clicked = 'MH_RainbowAllClicked'
 
@@ -1488,7 +1498,7 @@ doWindow = function()
     demoAllBtn.Anchors = '3,0'
     demoAllBtn.Text = 'Demo'
     demoAllBtn.HasHover = 'Yes'
-    tryColor(demoAllBtn, 'TextColor', 'Global.Yellow')
+    tryColor(demoAllBtn, 'TextColor', 'Global.WarningText')
     demoAllBtn.PluginComponent = myHandle
     demoAllBtn.Clicked = 'MH_DemoAllClicked'
 
@@ -1503,7 +1513,7 @@ doWindow = function()
     netBtn.Anchors = '5,0'
     netBtn.Text = 'Network Settings'
     netBtn.HasHover = 'Yes'
-    tryColor(netBtn, 'Texture', 'corner3')
+    tryColor(netBtn, 'Texture', 'corner8')
     netBtn.PluginComponent = myHandle
     netBtn.Clicked = 'MH_NetworkSettingsClicked'
 
