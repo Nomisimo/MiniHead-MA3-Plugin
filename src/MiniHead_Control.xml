@@ -1,0 +1,1001 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MiniHead Control - grandMA3 Plugin (importable wrapper)
+  https://github.com/Nomisimo/MiniHead-MA3-Plugin
+
+  BEST-EFFORT XML WRAPPER - the Lua code below (identical to
+  src/MiniHead_Control.lua) is the verified, tested part. This XML
+  shell around it - the exact tag/attribute names grandMA3 expects
+  for a Plugin Pool import - is this repo's best guess at the
+  format and has NOT been confirmed against a real console/onPC.
+
+  If importing this file fails or misbehaves, it is guaranteed to
+  still work the manual way: grandMA3 -> Plugin Pool -> right-click
+  -> New -> open the Lua editor -> paste in src/MiniHead_Control.lua
+  verbatim -> close. See docs/installation.md for both paths.
+-->
+<MA xmlns="http://schemas.malighting.de/grandma3/xml/MA"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    major_vers="2" minor_vers="1" stream_vers="1">
+  <Info datetime="2026-09-23T00:00:00" showfile="MiniHead-MA3-Plugin"/>
+  <Plugin name="MiniHead Control" index="0">
+    <Lua name="MiniHead Control" version="1.0">
+      <![CDATA[
+--[[
+  MiniHead Control - grandMA3 plugin
+  https://github.com/Nomisimo/MiniHead-MA3-Plugin
+
+  Discovers Nomisimo/MiniHead ESP32 moving-head nodes on the local network,
+  links each one to an MA3 fixture number, and pushes fixture ID + DMX patch
+  (universe/address, read from MA3's own patch) to the head over HTTP.
+  Also drives Identify / Blackout / Rainbow-Demo across the fleet.
+
+  Companion firmware: https://github.com/Nomisimo/MiniHead (Art-Net build)
+  Companion app:       https://github.com/Nomisimo/MiniHead-App
+
+  License: GPL-3.0 (see LICENSE)
+
+  --------------------------------------------------------------------------
+  A handful of integration points below talk to MA3-internal state (reading
+  the current command-line fixture selection, reading a fixture's DMX patch,
+  renaming a fixture, opening a socket) using the MA3 Lua API as best known
+  at build time. Each one is marked "VERIFY ON CONSOLE" and fails soft (the
+  plugin keeps working via its typed-input fallback) rather than crashing if
+  the exact call turns out to be wrong on a given MA3 version. Full list and
+  how to fix each one: docs/verification-checklist.md in this repo.
+  --------------------------------------------------------------------------
+]]--
+
+-- ============================================================================
+-- SECTION 1: Small utilities
+-- ============================================================================
+
+local function tokenize(arg)
+  local tokens = {}
+  for tok in tostring(arg or ""):gmatch("%S+") do
+    tokens[#tokens + 1] = tok
+  end
+  return tokens
+end
+
+local function ipParts(ip)
+  local a, b, c, d = tostring(ip or ""):match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if not a then return nil end
+  return tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+end
+
+local function ipSortKey(ip)
+  local a, b, c, d = ipParts(ip)
+  if not a then return 0 end
+  return a * 16777216 + b * 65536 + c * 256 + d
+end
+
+-- Accepts "1 Thru 8", "1 thru 8", "1-8", "1,3,5", "1 2 3"
+local function parseFixtureRange(str)
+  str = str or ""
+  local a, b = str:match("(%d+)%s*[Tt][Hh][Rr][Uu]%s*(%d+)")
+  if not a then a, b = str:match("(%d+)%s*%-%s*(%d+)") end
+  if a and b then
+    a, b = tonumber(a), tonumber(b)
+    if a > b then a, b = b, a end
+    local result = {}
+    for i = a, b do result[#result + 1] = i end
+    return result
+  end
+  local result = {}
+  for tok in str:gmatch("%d+") do
+    result[#result + 1] = tonumber(tok)
+  end
+  return result
+end
+
+-- ============================================================================
+-- SECTION 2: JSON - minimal pure-Lua encode/decode
+-- No dependency on any bundled MA3 json library, so this works regardless of
+-- what (if anything) grandMA3's Lua sandbox exposes globally as `json`.
+-- ============================================================================
+
+local json = {}
+
+local JSON_ESCAPES = {
+  ['"'] = '\\"', ['\\'] = '\\\\', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t',
+}
+
+local function jsonEncodeString(s)
+  local out = { '"' }
+  for i = 1, #s do
+    local c = s:sub(i, i)
+    out[#out + 1] = JSON_ESCAPES[c] or c
+  end
+  out[#out + 1] = '"'
+  return table.concat(out)
+end
+
+local function jsonIsArray(t)
+  local n = 0
+  for _ in pairs(t) do n = n + 1 end
+  for i = 1, n do
+    if t[i] == nil then return false end
+  end
+  return true
+end
+
+function json.encode(v)
+  local t = type(v)
+  if t == "nil" then
+    return "null"
+  elseif t == "boolean" then
+    return v and "true" or "false"
+  elseif t == "number" then
+    return tostring(v)
+  elseif t == "string" then
+    return jsonEncodeString(v)
+  elseif t == "table" then
+    if jsonIsArray(v) then
+      local parts = {}
+      for i = 1, #v do parts[#parts + 1] = json.encode(v[i]) end
+      return "[" .. table.concat(parts, ",") .. "]"
+    else
+      local parts = {}
+      for k, val in pairs(v) do
+        parts[#parts + 1] = jsonEncodeString(tostring(k)) .. ":" .. json.encode(val)
+      end
+      return "{" .. table.concat(parts, ",") .. "}"
+    end
+  end
+  return "null"
+end
+
+local function jsonSkipWs(s, i)
+  while i <= #s do
+    local c = s:sub(i, i)
+    if c ~= " " and c ~= "\t" and c ~= "\n" and c ~= "\r" then break end
+    i = i + 1
+  end
+  return i
+end
+
+local jsonParseValue -- forward declaration (mutually recursive with object/array)
+
+local function jsonParseString(s, i)
+  i = i + 1 -- opening quote
+  local out = {}
+  while i <= #s do
+    local c = s:sub(i, i)
+    if c == '"' then
+      return table.concat(out), i + 1
+    elseif c == "\\" then
+      local nc = s:sub(i + 1, i + 1)
+      if nc == "n" then out[#out + 1] = "\n"
+      elseif nc == "t" then out[#out + 1] = "\t"
+      elseif nc == "r" then out[#out + 1] = "\r"
+      elseif nc == "u" then
+        local hex = s:sub(i + 2, i + 5)
+        local code = tonumber(hex, 16) or 63
+        out[#out + 1] = (code < 128) and string.char(code) or "?"
+        i = i + 4
+      else
+        out[#out + 1] = nc
+      end
+      i = i + 2
+    else
+      out[#out + 1] = c
+      i = i + 1
+    end
+  end
+  return table.concat(out), i
+end
+
+local function jsonParseNumber(s, i)
+  local start = i
+  while i <= #s and s:sub(i, i):match("[%d%.%-%+eE]") do i = i + 1 end
+  return tonumber(s:sub(start, i - 1)), i
+end
+
+local function jsonParseArray(s, i)
+  i = i + 1 -- '['
+  local arr = {}
+  i = jsonSkipWs(s, i)
+  if s:sub(i, i) == "]" then return arr, i + 1 end
+  while true do
+    local val
+    val, i = jsonParseValue(s, i)
+    arr[#arr + 1] = val
+    i = jsonSkipWs(s, i)
+    local c = s:sub(i, i)
+    if c == "," then
+      i = jsonSkipWs(s, i + 1)
+    elseif c == "]" then
+      return arr, i + 1
+    else
+      return arr, i + 1
+    end
+  end
+end
+
+local function jsonParseObject(s, i)
+  i = i + 1 -- '{'
+  local obj = {}
+  i = jsonSkipWs(s, i)
+  if s:sub(i, i) == "}" then return obj, i + 1 end
+  while true do
+    i = jsonSkipWs(s, i)
+    local key
+    key, i = jsonParseString(s, i)
+    i = jsonSkipWs(s, i)
+    i = i + 1 -- ':'
+    i = jsonSkipWs(s, i)
+    local val
+    val, i = jsonParseValue(s, i)
+    obj[key] = val
+    i = jsonSkipWs(s, i)
+    local c = s:sub(i, i)
+    if c == "," then
+      i = i + 1
+    elseif c == "}" then
+      return obj, i + 1
+    else
+      return obj, i + 1
+    end
+  end
+end
+
+jsonParseValue = function(s, i)
+  i = jsonSkipWs(s, i)
+  local c = s:sub(i, i)
+  if c == '"' then return jsonParseString(s, i)
+  elseif c == "{" then return jsonParseObject(s, i)
+  elseif c == "[" then return jsonParseArray(s, i)
+  elseif c == "t" and s:sub(i, i + 3) == "true" then return true, i + 4
+  elseif c == "f" and s:sub(i, i + 4) == "false" then return false, i + 5
+  elseif c == "n" and s:sub(i, i + 3) == "null" then return nil, i + 4
+  else return jsonParseNumber(s, i)
+  end
+end
+
+function json.decode(s)
+  if not s or s == "" then return nil end
+  local ok, val = pcall(function()
+    local v = jsonParseValue(s, 1)
+    return v
+  end)
+  if ok then return val end
+  return nil
+end
+
+-- ============================================================================
+-- SECTION 3: Persistence (grandMA3 show variables)
+-- Whole head list / settings are stored as one JSON string per global show
+-- variable, so this survives save/reload same as the rest of the showfile.
+-- ============================================================================
+
+local SETTINGS_VAR = "MiniHead_Settings"
+local HEADS_VAR = "MiniHead_Heads"
+
+local function defaultSettings()
+  return {
+    seedIP = "",
+    pollInterval = 20,   -- seconds; informational, used by your Refresh macro timer
+    toastEnabled = true,
+    cmdlineLogEnabled = true,
+    scanRadius = 20,      -- +/- host addresses probed around the seed IP on Discover
+  }
+end
+
+local function loadSettings()
+  local defaults = defaultSettings()
+  local ok, raw = pcall(function() return gma.show.getvar(SETTINGS_VAR) end)
+  if ok and raw and raw ~= "" then
+    local data = json.decode(raw)
+    if type(data) == "table" then
+      for k, v in pairs(defaults) do
+        if data[k] == nil then data[k] = v end
+      end
+      return data
+    end
+  end
+  return defaults
+end
+
+local function saveSettings(s)
+  pcall(function() gma.show.setvar(SETTINGS_VAR, json.encode(s)) end)
+end
+
+local function loadHeads()
+  local ok, raw = pcall(function() return gma.show.getvar(HEADS_VAR) end)
+  if ok and raw and raw ~= "" then
+    local data = json.decode(raw)
+    if type(data) == "table" then return data end
+  end
+  return {}
+end
+
+local function saveHeads(list)
+  pcall(function() gma.show.setvar(HEADS_VAR, json.encode(list)) end)
+end
+
+-- ============================================================================
+-- SECTION 4: Feedback / error surfacing (spec S6)
+-- ============================================================================
+
+local function notifyInfo(msg)
+  gma.feedback("[MiniHead] " .. msg)
+end
+
+local function notifyError(msg)
+  local s = loadSettings()
+  if s.cmdlineLogEnabled ~= false then
+    gma.feedback("[MiniHead] ERROR: " .. msg)
+  end
+  if s.toastEnabled ~= false then
+    pcall(function() gma.gui.msgbox("MiniHead - Error", msg) end)
+  end
+end
+
+-- ============================================================================
+-- SECTION 5: Head-list helpers
+-- ============================================================================
+
+local function findHeadByIp(ip)
+  local heads = loadHeads()
+  for idx, h in ipairs(heads) do
+    if h.ip == ip then return h, idx, heads end
+  end
+  return nil, nil, heads
+end
+
+local function renderHeadsTable()
+  local heads = loadHeads()
+  table.sort(heads, function(a, b) return ipSortKey(a.ip) < ipSortKey(b.ip) end)
+  gma.feedback("[MiniHead] " .. #heads .. " head(s) known:")
+  if #heads == 0 then
+    gma.feedback("  (none yet - run: Discover <ip>)")
+    return
+  end
+  gma.feedback(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
+    "St", "IP", "FixID", "Name", "Fix#", "U.Addr", "Role"))
+  for _, h in ipairs(heads) do
+    local status = h.online and "On" or "Off"
+    local ua = "--"
+    if h.universe and h.addr then
+      ua = h.universe .. "." .. string.format("%03d", h.addr)
+    end
+    gma.feedback(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
+      status, h.ip or "-", tostring(h.fixID or "-"), h.name or "-",
+      tostring(h.fixtureNo or "-"), ua, h.role or "-"))
+  end
+end
+
+-- ============================================================================
+-- SECTION 6: HTTP transport
+--
+-- *** VERIFY ON CONSOLE - docs/verification-checklist.md item #1 ***
+-- This is the one function (socketSend) that actually opens a network
+-- connection. It targets `gma.socket`, the MA3 Lua socket API. If that
+-- name/shape is wrong for your build, this is the only place to fix -
+-- everything above and below it (JSON, the API client, the UI/commands)
+-- stays the same.
+-- ============================================================================
+
+local function buildHttpRequest(method, ip, path, bodyStr)
+  local lines = {}
+  lines[#lines + 1] = method .. " " .. path .. " HTTP/1.1"
+  lines[#lines + 1] = "Host: " .. ip
+  lines[#lines + 1] = "User-Agent: MiniHead-MA3-Plugin"
+  lines[#lines + 1] = "Accept: application/json"
+  lines[#lines + 1] = "Connection: close"
+  if bodyStr and #bodyStr > 0 then
+    lines[#lines + 1] = "Content-Type: application/json"
+    lines[#lines + 1] = "Content-Length: " .. tostring(#bodyStr)
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = bodyStr or ""
+  return table.concat(lines, "\r\n")
+end
+
+local function parseHttpResponse(raw)
+  if not raw or #raw == 0 then return nil, nil end
+  local headerEnd = raw:find("\r\n\r\n", 1, true)
+  if not headerEnd then return nil, nil end
+  local head = raw:sub(1, headerEnd - 1)
+  local body = raw:sub(headerEnd + 4)
+  local code = head:match("HTTP/1%.[01]%s+(%d+)")
+  return tonumber(code), body
+end
+
+-- Best-effort socket I/O. Tries gma.socket (primary guess). Every candidate
+-- is wrapped in pcall so a wrong/missing API degrades to a clean error
+-- instead of a hard crash.
+local function socketSend(ip, port, requestStr, timeoutMs)
+  local ok, resultOrErr = pcall(function()
+    local sock = gma.socket.new("tcp")
+    if not sock then error("gma.socket.new('tcp') returned nil") end
+    if sock.settimeout then sock:settimeout((timeoutMs or 3000) / 1000) end
+    local connected, connErr = sock:connect(ip, port)
+    if connected == false then error(connErr or "connect failed") end
+    sock:send(requestStr)
+    local chunks = {}
+    local guard = 0
+    while guard < 64 do -- bounded read loop; response bodies here are tiny
+      guard = guard + 1
+      local chunk, err, partial = sock:receive(2048)
+      if chunk and #chunk > 0 then
+        chunks[#chunks + 1] = chunk
+      elseif partial and #partial > 0 then
+        chunks[#chunks + 1] = partial
+        break
+      else
+        break
+      end
+      if err then break end
+    end
+    if sock.close then sock:close() end
+    return table.concat(chunks)
+  end)
+  if ok and resultOrErr and #resultOrErr > 0 then
+    return resultOrErr, nil
+  end
+  return nil, (not ok and tostring(resultOrErr)) or "no response"
+end
+
+-- Returns: ok(bool), httpStatus(number|nil), bodyString(string|nil), err(string|nil)
+local function httpRequest(ip, method, path, bodyTable, timeoutMs)
+  local bodyStr = bodyTable and json.encode(bodyTable) or nil
+  local reqStr = buildHttpRequest(method, ip, path, bodyStr)
+  local raw, err = socketSend(ip, 80, reqStr, timeoutMs)
+  if not raw then
+    return false, nil, nil, err or "no response"
+  end
+  local code, respBody = parseHttpResponse(raw)
+  if not code then
+    return false, nil, nil, "unparseable response"
+  end
+  return true, code, respBody, nil
+end
+
+-- ============================================================================
+-- SECTION 7: MiniHead API client
+-- Endpoints confirmed against Nomisimo/MiniHead firmware source
+-- (Firmware/MiniHead/main/core/wifi/*.h) and Firmware/MiniHead/README.md S8,
+-- not just the plugin spec. See docs/api-reference.md for field-by-field
+-- notes and where the spec/App-docs/firmware disagreed.
+-- ============================================================================
+
+local api = {}
+
+function api.getStatus(ip)
+  local ok, code, body = httpRequest(ip, "GET", "/api/status", nil, 800)
+  if ok and code == 200 then
+    return true, json.decode(body)
+  end
+  return false, nil
+end
+
+function api.getHeads(ip)
+  local ok, code, body = httpRequest(ip, "GET", "/api/heads", nil, 2500)
+  if ok and code == 200 then
+    local data = json.decode(body)
+    if type(data) == "table" then return true, data end
+  end
+  return false, nil
+end
+
+-- Always called against the head's OWN ip - config routes have no leader
+-- redirect (Firmware/MiniHead/README.md S8.5).
+function api.setFixID(ip, fixID)
+  local ok, code = httpRequest(ip, "POST", "/api/config/fixid", { fixID = fixID }, 2000)
+  return ok and code == 200
+end
+
+-- POST /api/artnet/patch (not /api/config/patch - see docs/api-reference.md).
+-- Requires the head's firmware to be built with PLUGIN_ARTNET, which is the
+-- companion firmware's default build per the plugin spec.
+function api.setPatch(ip, universe, startAddr)
+  local ok, code = httpRequest(ip, "POST", "/api/artnet/patch", { universe = universe, startAddr = startAddr }, 2000)
+  return ok and code == 200, code
+end
+
+-- "SELF" is a literal accepted by the firmware so we never need to know a
+-- head's own MAC to identify it - call this directly against its own IP.
+function api.identify(ip, on)
+  local ok, code = httpRequest(ip, "POST", "/api/heads/SELF/identify", { on = on }, 1500)
+  return ok and code == 200
+end
+
+-- Global action: broadcasts to all heads via UDP regardless of which head's
+-- IP receives the HTTP call.
+function api.blackoutAll(ip)
+  local ok, code = httpRequest(ip, "POST", "/api/blackout", nil, 1500)
+  return ok and code == 200
+end
+
+function api.rainbowAll(ip, on)
+  local ok, code = httpRequest(ip, "POST", "/api/rainbow", { on = on }, 1500)
+  return ok and code == 200
+end
+
+-- ============================================================================
+-- SECTION 8: MA3-internal integration
+--
+-- *** VERIFY ON CONSOLE - docs/verification-checklist.md items #2-#4 ***
+-- Reading MA3's own patch/selection and writing a fixture name are the
+-- other genuinely uncertain integration points (spec S9). Each fails soft:
+-- callers fall back to asking the user to type the value instead.
+-- ============================================================================
+
+-- Reads the DMX universe/address MA3 has patched for a fixture number.
+-- Returns universe, address (both nil if unpatched or unreadable).
+local function ma3ReadPatch(fixtureNo)
+  if not fixtureNo then return nil, nil end
+  local ok, uni, addr = pcall(function()
+    local handle = gma.show.getobj.handle("Fixture " .. tostring(fixtureNo))
+    if not handle or handle == 0 then return nil, nil end
+    local patchStr = gma.show.property.get(handle, "Patch")
+    if patchStr and tostring(patchStr) ~= "" then
+      local u, a = tostring(patchStr):match("(%d+)%.(%d+)")
+      if u and a then return tonumber(u), tonumber(a) end
+    end
+    local u2 = gma.show.property.get(handle, "Universe")
+    local a2 = gma.show.property.get(handle, "Address")
+    if u2 and a2 then return tonumber(u2), tonumber(a2) end
+    return nil, nil
+  end)
+  if ok then return uni, addr end
+  return nil, nil
+end
+
+-- Best-effort read of the current MA3 command-line/floor fixture selection.
+-- Unverified global-var name - if it doesn't resolve, callers just fall
+-- back to typed input (spec S4: typing must always work standalone).
+local function ma3ReadSelectedFixtures()
+  local ok, result = pcall(function() return gma.show.getvar("SelFixtures") end)
+  if ok and result and tostring(result) ~= "" then
+    return parseFixtureRange(tostring(result))
+  end
+  return nil
+end
+
+local function ma3RenameFixture(fixtureNo, newName)
+  local ok = pcall(function()
+    local handle = gma.show.getobj.handle("Fixture " .. tostring(fixtureNo))
+    if not handle then error("no handle for Fixture " .. tostring(fixtureNo)) end
+    gma.show.property.set(handle, "Name", newName)
+  end)
+  return ok
+end
+
+-- Best-effort text prompt (seed IP entry etc.) - tries two plausible API
+-- shapes before giving up.
+local function promptText(title, default)
+  local ok, result = pcall(function() return gma.textinput(title, default or "") end)
+  if ok and result and result ~= "" then return result end
+  local ok2, result2 = pcall(function() return gma.gui.textinput(title, default or "") end)
+  if ok2 and result2 and result2 ~= "" then return result2 end
+  return nil
+end
+
+local function confirmDialog(title, msg)
+  local ok, result = pcall(function() return gma.gui.confirm(title, msg) end)
+  return ok and result and true or false
+end
+
+-- ============================================================================
+-- SECTION 9: Discovery
+-- ============================================================================
+
+-- Bounded probe: only +/-radius host addresses around the seed, never a
+-- blind /24 sweep - keeps a plugin invocation from hanging the console on a
+-- mostly-empty subnet. Widen via: Settings radius <n>.
+local function subnetProbe(seedIp, radius, knownHeads)
+  local a, b, c, d = ipParts(seedIp)
+  if not a then return {} end
+  local known = {}
+  for _, h in ipairs(knownHeads or {}) do known[h.ip] = true end
+  local lo = math.max(1, d - radius)
+  local hi = math.min(254, d + radius)
+  local found = {}
+  for i = lo, hi do
+    if i ~= d then
+      local ip = a .. "." .. b .. "." .. c .. "." .. i
+      if not known[ip] then
+        local ok = api.getStatus(ip)
+        if ok then found[#found + 1] = ip end
+      end
+    end
+  end
+  return found
+end
+
+local function doDiscover(seedIp)
+  if not seedIp or seedIp == "" then
+    seedIp = promptText("MiniHead - Enter a head's IP address", "192.168.1.")
+  end
+  if not seedIp or seedIp == "" then
+    notifyInfo("Discover cancelled - no IP given.")
+    return
+  end
+
+  notifyInfo("Probing " .. seedIp .. " ...")
+  local okStatus = api.getStatus(seedIp)
+  if not okStatus then
+    notifyError("No response from " .. seedIp .. " on port 80. Check the IP and that the head is powered and on this network.")
+    return
+  end
+
+  local settings = loadSettings()
+  settings.seedIP = seedIp
+  saveSettings(settings)
+
+  local heads = {}
+  local okHeads, list = api.getHeads(seedIp)
+  if okHeads and list then
+    for _, h in ipairs(list) do
+      heads[#heads + 1] = {
+        mac = h.mac, ip = h.ip, name = h.name, fixID = h.fixID,
+        role = h.role, fixtureNo = nil, online = true,
+      }
+    end
+    notifyInfo(#heads .. " head(s) found via " .. seedIp .. ".")
+  else
+    heads[1] = { mac = "", ip = seedIp, name = "Head", fixID = 0, role = "LEADER", fixtureNo = nil, online = true }
+    notifyInfo("Connected to " .. seedIp .. " but it returned no /api/heads list - added it alone.")
+  end
+
+  -- Preserve existing fixture links for heads we already knew about.
+  local existing = loadHeads()
+  local byIp = {}
+  for _, h in ipairs(existing) do byIp[h.ip] = h end
+  for _, h in ipairs(heads) do
+    local prev = byIp[h.ip]
+    if prev then h.fixtureNo = prev.fixtureNo end
+  end
+  saveHeads(heads)
+
+  local radius = settings.scanRadius or 20
+  notifyInfo("Scanning +/-" .. radius .. " addresses around " .. seedIp .. " for extra heads...")
+  local extra = subnetProbe(seedIp, radius, heads)
+  if #extra > 0 then
+    notifyInfo(#extra .. " extra head(s) found by subnet scan (not in that list - re-run Discover on one of them to merge): " .. table.concat(extra, ", "))
+  end
+
+  renderHeadsTable()
+end
+
+local function doRefresh()
+  local heads = loadHeads()
+  if #heads == 0 then
+    notifyInfo("No heads known yet - run: Discover <ip>")
+    return
+  end
+
+  local leaderIp = nil
+  for _, h in ipairs(heads) do
+    if h.role == "LEADER" then leaderIp = h.ip break end
+  end
+  local sourceIp = leaderIp or heads[1].ip
+
+  local okHeads, list = api.getHeads(sourceIp)
+  if okHeads and list then
+    local prevByIp = {}
+    for _, h in ipairs(heads) do prevByIp[h.ip] = h end
+    local fresh = {}
+    for _, h in ipairs(list) do
+      local prev = prevByIp[h.ip]
+      fresh[#fresh + 1] = {
+        mac = h.mac, ip = h.ip, name = h.name, fixID = h.fixID, role = h.role,
+        fixtureNo = prev and prev.fixtureNo or nil, online = true,
+      }
+    end
+    heads = fresh
+  else
+    notifyError("Could not refresh the head list from " .. sourceIp .. " - keeping the last known list.")
+  end
+
+  for _, h in ipairs(heads) do
+    h.online = api.getStatus(h.ip) and true or false
+  end
+
+  saveHeads(heads)
+  renderHeadsTable()
+end
+
+-- ============================================================================
+-- SECTION 10: Apply logic (single + batch)
+-- ============================================================================
+
+local function doSetFixID(ip, val)
+  local head, _, heads = findHeadByIp(ip)
+  if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
+  local n = tonumber(val)
+  if not n then notifyError("Fixture ID must be a number."); return end
+  head.fixID = n
+  saveHeads(heads)
+  notifyInfo(ip .. " fixID field set to " .. n .. " (not yet pushed - run: Apply " .. ip .. ")")
+end
+
+local function doSetFixture(ip, val)
+  local head, _, heads = findHeadByIp(ip)
+  if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
+  local n = tonumber(val)
+  head.fixtureNo = n
+  saveHeads(heads)
+  if n then
+    notifyInfo(ip .. " linked to MA3 Fixture " .. n .. ".")
+  else
+    notifyInfo(ip .. " fixture link cleared.")
+  end
+end
+
+local function doUseSelection(ip)
+  local sel = ma3ReadSelectedFixtures()
+  if not sel or #sel == 0 then
+    notifyError("Could not read a fixture selection from MA3 (or nothing is selected). Type it instead: SetFixture " .. tostring(ip) .. " <n>")
+    return
+  end
+  doSetFixture(ip, tostring(sel[1]))
+end
+
+local function doApply(ip)
+  local head, _, heads = findHeadByIp(ip)
+  if not head then
+    notifyError("No known head at " .. tostring(ip) .. ". Run Discover or List first.")
+    return
+  end
+
+  local universe, addr = nil, nil
+  if head.fixtureNo then
+    universe, addr = ma3ReadPatch(head.fixtureNo)
+    if not universe then
+      local proceed = confirmDialog("MiniHead - Fixture Not Patched",
+        "Fixture " .. head.fixtureNo .. " has no readable DMX patch in MA3.\n" ..
+        "Apply the fixture ID only and skip the patch push?")
+      if not proceed then
+        notifyInfo("Apply cancelled for " .. ip .. ".")
+        return
+      end
+    end
+  end
+
+  local okId = api.setFixID(head.ip, head.fixID or 0)
+  if not okId then
+    notifyError("Failed to set fixture ID on " .. head.ip .. " (offline or timed out).")
+    return
+  end
+
+  if universe and addr then
+    local okPatch, code = api.setPatch(head.ip, universe, addr)
+    if not okPatch then
+      notifyError("Fixture ID set, but patch push failed on " .. head.ip ..
+        " (HTTP " .. tostring(code) .. "). Confirm the head's firmware has Art-Net (PLUGIN_ARTNET) enabled.")
+      head.universe, head.addr = nil, nil
+      saveHeads(heads)
+      return
+    end
+    head.universe, head.addr = universe, addr
+    notifyInfo("Applied to " .. head.ip .. ": fixID=" .. tostring(head.fixID) ..
+      ", patch=" .. universe .. "." .. string.format("%03d", addr))
+  else
+    notifyInfo("Applied to " .. head.ip .. ": fixID=" .. tostring(head.fixID) .. " (no patch pushed).")
+  end
+
+  saveHeads(heads)
+end
+
+local function doIdentify(ip)
+  local head = findHeadByIp(ip)
+  if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
+  if api.identify(head.ip, true) then
+    notifyInfo("Identify flashed on " .. head.ip .. ".")
+  else
+    notifyError("Identify failed on " .. head.ip .. " (offline or timed out).")
+  end
+end
+
+local function doIdentifyAll()
+  local heads = loadHeads()
+  if #heads == 0 then notifyInfo("No heads known yet."); return end
+  local okCount = 0
+  for _, h in ipairs(heads) do
+    if api.identify(h.ip, true) then okCount = okCount + 1 end
+  end
+  notifyInfo("Identify sent to " .. okCount .. "/" .. #heads .. " head(s).")
+end
+
+local function anyReachableIp()
+  local heads = loadHeads()
+  for _, h in ipairs(heads) do
+    if h.role == "LEADER" then return h.ip end
+  end
+  if heads[1] then return heads[1].ip end
+  return nil
+end
+
+local function doBlackoutAll()
+  local ip = anyReachableIp()
+  if not ip then notifyInfo("No heads known yet."); return end
+  if api.blackoutAll(ip) then
+    notifyInfo("Blackout sent (all heads).")
+  else
+    notifyError("Blackout failed - " .. ip .. " unreachable. Try Refresh.")
+  end
+end
+
+local function doRainbowAll(on)
+  local ip = anyReachableIp()
+  if not ip then notifyInfo("No heads known yet."); return end
+  if api.rainbowAll(ip, on) then
+    notifyInfo("Rainbow demo " .. (on and "started" or "stopped") .. " (all heads).")
+  else
+    notifyError("Rainbow command failed - " .. ip .. " unreachable. Try Refresh.")
+  end
+end
+
+local function doBatch(rangeArg)
+  local fixtureNumbers
+  if rangeArg and rangeArg ~= "" then
+    fixtureNumbers = parseFixtureRange(rangeArg)
+  else
+    fixtureNumbers = ma3ReadSelectedFixtures()
+  end
+  if not fixtureNumbers or #fixtureNumbers == 0 then
+    notifyError("No fixture range given. Select a range in MA3 first, or type it: Batch 1 Thru 8")
+    return
+  end
+  table.sort(fixtureNumbers)
+
+  local heads = loadHeads()
+  if #heads == 0 then notifyInfo("No heads known yet - run: Discover <ip>"); return end
+  table.sort(heads, function(a, b) return ipSortKey(a.ip) < ipSortKey(b.ip) end)
+
+  local n = math.min(#fixtureNumbers, #heads)
+  if n == 0 then notifyInfo("Nothing to match."); return end
+
+  notifyInfo("Batch preview (" .. n .. " pair(s), matched by IP order):")
+  for i = 1, n do
+    gma.feedback("  Fixture " .. fixtureNumbers[i] .. "  <->  " .. heads[i].ip .. " (" .. (heads[i].name or "?") .. ")")
+  end
+  if #fixtureNumbers ~= #heads then
+    notifyInfo("Note: " .. #fixtureNumbers .. " fixture(s) selected but " .. #heads .. " head(s) known - matching the first " .. n .. ".")
+  end
+
+  if not confirmDialog("MiniHead - Batch Apply", "Apply fixID + patch to " .. n .. " head(s) as previewed above?") then
+    notifyInfo("Batch apply cancelled.")
+    return
+  end
+
+  for i = 1, n do
+    heads[i].fixtureNo = fixtureNumbers[i]
+  end
+  saveHeads(heads)
+  for i = 1, n do
+    doApply(heads[i].ip)
+  end
+  notifyInfo("Batch apply complete.")
+end
+
+local function doRename(ip)
+  local head = findHeadByIp(ip)
+  if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
+  if not head.fixtureNo then
+    notifyError(ip .. " isn't linked to an MA3 fixture yet - use SetFixture first.")
+    return
+  end
+  local msg = "Rename MA3 Fixture " .. head.fixtureNo .. " to \"" .. (head.name or "") .. "\" (the head's own name)?\n" ..
+    "This overwrites the fixture's current name in your show."
+  if not confirmDialog("MiniHead - Rename Fixture", msg) then
+    notifyInfo("Rename cancelled.")
+    return
+  end
+  if ma3RenameFixture(head.fixtureNo, head.name or "") then
+    notifyInfo("Fixture " .. head.fixtureNo .. " renamed to \"" .. (head.name or "") .. "\".")
+  else
+    notifyError("Rename failed - could not write the fixture name in MA3 (see docs/verification-checklist.md).")
+  end
+end
+
+-- ============================================================================
+-- SECTION 11: Settings & help
+-- ============================================================================
+
+local function doSettings()
+  local s = loadSettings()
+  gma.feedback("[MiniHead] Settings:")
+  gma.feedback("  Poll interval: " .. s.pollInterval .. "s (wire Refresh to a timed macro at this interval)")
+  gma.feedback("  Toast on error: " .. tostring(s.toastEnabled))
+  gma.feedback("  Command-line log: " .. tostring(s.cmdlineLogEnabled))
+  gma.feedback("  Subnet scan radius: +/-" .. s.scanRadius)
+  gma.feedback("  Change with: Settings poll <sec> | Settings toast <on|off> | Settings log <on|off> | Settings radius <n>")
+end
+
+local function doSettingsSet(key, val)
+  local s = loadSettings()
+  key = (key or ""):lower()
+  if key == "poll" then
+    local n = tonumber(val)
+    if n and n >= 5 then s.pollInterval = n else notifyError("Poll interval must be a number >= 5."); return end
+  elseif key == "toast" then
+    s.toastEnabled = (val == "on" or val == "true")
+  elseif key == "log" then
+    s.cmdlineLogEnabled = (val == "on" or val == "true")
+  elseif key == "radius" then
+    local n = tonumber(val)
+    if n and n > 0 then s.scanRadius = n else notifyError("Radius must be a positive number."); return end
+  else
+    notifyError("Unknown setting: " .. tostring(key))
+    return
+  end
+  saveSettings(s)
+  doSettings()
+end
+
+local function doHelp()
+  local lines = {
+    "MiniHead Control - commands, e.g. Cmd('Plugin \"MiniHead Control\" \"List\"'):",
+    "  Discover [ip]               - set/seed a head IP, pull /api/heads, scan nearby",
+    "  List                        - show the head table",
+    "  Refresh                     - re-check online status + re-pull head list",
+    "  SetFixID <ip> <n>           - edit a row's fixture ID field (local only)",
+    "  SetFixture <ip> <n>         - link a row to MA3 fixture number n",
+    "  UseSelection <ip>           - fill SetFixture from the current MA3 selection",
+    "  Apply <ip>                  - push fixID + patch to that head",
+    "  Identify <ip>               - flash one head",
+    "  IdentifyAll                 - flash all heads",
+    "  BlackoutAll                 - blackout all heads",
+    "  RainbowAll / RainbowOff     - start/stop rainbow demo on all heads",
+    "  Batch [range]               - batch-link+apply an MA3 selection (or typed range), matched by IP order",
+    "  Rename <ip>                 - write the head's name onto its linked MA3 fixture (confirms every time)",
+    "  NetworkSettings              - open MA3's Art-Net Connector Configuration menu",
+    "  Settings / Settings <k> <v> - view or change poll interval, toasts, logging, scan radius",
+    "  Help                        - this list",
+  }
+  for _, l in ipairs(lines) do gma.feedback(l) end
+end
+
+-- ============================================================================
+-- SECTION 12: Entry point
+-- Standard MA2/MA3 plugin signature. Invoke e.g.:
+--   Cmd('Plugin "MiniHead Control" "List"')
+--   Cmd('Plugin "MiniHead Control" "Apply 192.168.1.42"')
+-- ============================================================================
+
+function main(display, arg)
+  local tokens = tokenize(arg)
+  local cmd = (tokens[1] or ""):lower()
+  table.remove(tokens, 1)
+
+  if cmd == "" then
+    local settings = loadSettings()
+    if settings.seedIP == "" and #loadHeads() == 0 then
+      doDiscover(nil)
+      return
+    end
+    renderHeadsTable()
+    return
+  end
+
+  if cmd == "list" then renderHeadsTable()
+  elseif cmd == "discover" then doDiscover(tokens[1])
+  elseif cmd == "refresh" then doRefresh()
+  elseif cmd == "setfixid" then doSetFixID(tokens[1], tokens[2])
+  elseif cmd == "setfixture" then doSetFixture(tokens[1], tokens[2])
+  elseif cmd == "useselection" then doUseSelection(tokens[1])
+  elseif cmd == "apply" then doApply(tokens[1])
+  elseif cmd == "identify" then doIdentify(tokens[1])
+  elseif cmd == "identifyall" then doIdentifyAll()
+  elseif cmd == "blackoutall" then doBlackoutAll()
+  elseif cmd == "rainbowall" then doRainbowAll(true)
+  elseif cmd == "rainbowoff" then doRainbowAll(false)
+  elseif cmd == "batch" then doBatch(table.concat(tokens, " "))
+  elseif cmd == "rename" then doRename(tokens[1])
+  elseif cmd == "networksettings" then Cmd('Menu "ConnectorConfig"')
+  elseif cmd == "settings" then
+    if tokens[1] and tokens[2] then doSettingsSet(tokens[1], tokens[2]) else doSettings() end
+  elseif cmd == "help" then doHelp()
+  else
+    notifyError("Unknown MiniHead command: \"" .. cmd .. "\". Try: Cmd('Plugin \"MiniHead Control\" \"Help\"')")
+  end
+end
+]]>
+    </Lua>
+  </Plugin>
+</MA>
