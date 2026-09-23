@@ -1,59 +1,40 @@
-# Verification checklist
+# Verification status
 
-This plugin was built without access to a real grandMA3 console or onPC to test against. Everything that is pure Lua — JSON encode/decode, command parsing, persistence, the fixture-range/IP-sort logic, the whole HTTP request/response builder, and every error-handling path — has been unit-tested against a real Lua 5.5 interpreter with the grandMA3 host functions mocked out (including a mock returning real firmware-shaped JSON), and all of that passes cleanly.
+Updated after a live test session against a real grandMA3 onPC 2.4.2.2 installation. Everything below is now either **confirmed working against real hardware**, or **confirmed via grandMA3's own `HelpLua` function export** (not guessed).
 
-What's **not** verified is the handful of places this code calls into the actual MA3 Lua host API. Each one is marked `VERIFY ON CONSOLE` in `src/MiniHead_Control.lua` and fails soft — the plugin keeps working via a typed-input fallback — rather than crashing if a call turns out to be wrong. This doc is the prioritized list of what to check first and how, in the order they'll actually block you.
+## Confirmed working end-to-end, against real hardware
 
-## 1. Networking (`socketSend`, ~line 330) — blocks everything
+- Plugin loads and runs via the **file-based Import method** (XML + separate `.lua` referenced by `FileName`, placed in `gma3_library/datapools/plugins/<name>/`) — see [installation.md](installation.md).
+- Entry point: `function Main(display_handle, arg) ... end` followed by **`return Main`** at the very end of the file. This is the actual, non-obvious requirement — a script that defines `Main` (or even lowercase `main`) but never returns it is loaded without any error and simply never invoked. This was the root cause of a long "nothing happens, no error" debugging session; see the commit history for the full trail.
+- `Printf(...)` — writes to the Command Line History. Used for all plugin output.
+- `Cmd(...)` — executes a command-line command (used for `NetworkSettings` → `Cmd('Menu "ConnectorConfig"')`).
+- Plugin invocation from the command line: **`Plugin <pool-number> "<args>"`** (e.g. `Plugin 4 "Discover 192.168.1.50"`). Note: `Plugin "<Plugin Name>" ...` (name in quotes instead of a number) returned `Illegal object` in testing on this build, even though MA Lighting's own keyword documentation describes it as valid syntax — use the pool number.
+- **Full HTTP round-trip to a real MiniHead ESP32**: `require("socket")` (LuaSocket) → `socket.tcp()` → `:connect()/:send()/:receive()/:close()` → real JSON response parsed by this plugin's own JSON decoder → rendered correctly. Confirmed via `Discover <real-ip>` against actual hardware.
+- `Confirm(title, message, nil, showCancelBoolean)` — used for all confirm dialogs.
+- `TextInput(title, defaultValue)` — used for the first-run seed-IP prompt.
+- `GetVar(GlobalVars(), name)` / `SetVar(GlobalVars(), name, value)` — used for persisting settings and the head list into the showfile.
+- `FromAddr("Fixture " .. n)` — used to get a handle to an MA3 fixture by number.
+- `Set(handle, "Name", newName)` — used for the opt-in fixture-rename feature.
+- `SelectionTable()` / `GetSubfixture(index)` / `Get(handle, "FID")` — used to read the current MA3 floor/command-line selection.
 
-**What it does:** opens a TCP connection to a head and sends a raw HTTP/1.1 request, using `gma.socket.new("tcp")`, `:connect()`, `:send()`, `:receive()`, `:close()`.
+All of the above were verified with a throwaway diagnostic plugin (`Echo`/`Printf`/environment probes) before being wired into the real plugin, and the full command set (`Help`, `Discover`, `List`, `SetFixture`, `Apply`, `Rename`, `IdentifyAll`, `BlackoutAll`, `RainbowAll`, `Settings`) was exercised via a local Lua-interpreter test harness with the confirmed API stubbed out, before being tested live. See the repo's commit history for both.
 
-**Confidence:** moderate. grandMA3 plugins are known to do real network I/O (OSC, external device control is a common plugin use case), but the exact method names on the socket object are a best guess, not a confirmed API.
+## One soft spot left: reading a fixture's DMX patch
 
-**How to verify:** run `Cmd('Plugin "MiniHead Control" "Discover" "<a-real-head-ip>"')` with a MiniHead on the network. If it reports "No response from ... on port 80" even though the head is definitely up and reachable by browser, open the plugin in the console's Lua editor and check the error: a `gma.socket` reference error means the API name is wrong.
+`ma3ReadPatch()` in `src/MiniHead_Control.lua` reads a fixture's universe/address via `Get(handle, "Patch")` (expecting a `"universe.address"` string), falling back to separate `Get(handle, "Universe")` / `Get(handle, "Address")` properties. The **mechanism** (`FromAddr` + `Get`) is confirmed real and correct — the exact **property name** MA3 uses for a fixture's patch is the one piece not yet confirmed against a real patched fixture.
 
-**If it's wrong:** this is the *only* function that needs to change. Nothing else in the file assumes anything about how the socket works — `httpRequest()` just calls `socketSend()` and gets back a raw string or an error. Swap in whatever the console's actual Lua console reveals (its error messages will name the real object/method) and everything above and below keeps working unmodified.
+**Impact if the property name is wrong:** `Apply` treats "can't read a patch" and "genuinely unpatched" identically — it asks (via confirm dialog) whether to apply the fixture ID only and skip the patch push. So a wrong property name degrades to "always asks to skip the patch," never a crash or wrong data sent.
 
-## 2. Reading the current MA3 fixture selection (`ma3ReadSelectedFixtures`, ~line 660)
+**How to verify:** patch a fixture in MA3, link a head to it (`SetFixture <ip> <n>`), then `Apply <ip>`. If it reads correctly you'll see `patch=U.AAA` in the output instead of the "not patched" prompt.
 
-**What it does:** tries `gma.show.getvar("SelFixtures")` to read which fixture(s) are currently selected on the command line/floor, so `UseSelection` and `Batch` can auto-fill from a floor selection instead of typing.
+**If it's wrong:** open the plugin's Lua editor, use the built-in **API Description** panel (search for "Patch" or fixture-related property names) or try `Get(handle):Dump()`-style introspection (`Dump()` on a fixture handle prints all its properties to the Command Line History) to find the exact property name, then adjust the two `Get(handle, "...")` calls in `ma3ReadPatch()`.
 
-**Confidence:** low — this was flagged as an open item in the spec itself. `"SelFixtures"` is a guess at the variable/property name.
+## How this was actually debugged (for context)
 
-**Impact if wrong:** low. Both `UseSelection <ip>` and `Batch` (with no argument) fall back to a clear error telling you to type the value instead (`SetFixture <ip> <n>` / `Batch 1 Thru 8`), which always works since it's just string parsing, not an MA3 read. This is a convenience feature, not a blocker.
+This plugin's Lua API was initially written against a guessed `gma.*` namespace (`gma.feedback`, `gma.gui.msgbox`, `gma.show.getvar`, `gma.socket`, etc.) based on general MA-family plugin conventions. None of it existed. The real API turned out to be flat globals (`Printf`, `Confirm`, `GetVar`, `FromAddr`, ...), confirmed by:
 
-**How to fix:** select a fixture in MA3, run `Cmd('Plugin "MiniHead Control" "UseSelection" "<some-ip>"')`, see if it picks up the selection. If not, the right call is likely something reachable via `gma.show.getobj` on the command line's current content — check MA3's Lua API docs in-console (`Help` on the Lua object browser, if your build has one) for how other selection-aware plugins read this.
+1. Running `HelpLua` on the console, which exports the complete, version-exact function list to `grandMA3_lua_functions.txt` in the grandMA3 library folder — the single most useful thing found during this process.
+2. Cross-referencing two independent, real community plugin projects ([LightYourWay/grandMA3-plugin-starter](https://github.com/LightYourWay/grandMA3-plugin-starter), version-pinned to 2.4.2.2, and [patopesto/GrandMA3-Plugins](https://github.com/patopesto/GrandMA3-Plugins)) for the entry-point convention and XML schema.
+3. A throwaway diagnostic plugin, iterated live against the console, to isolate exactly which assumption was wrong (entry point vs. function names vs. XML format vs. networking availability) before rewriting the real plugin.
 
-## 3. Reading a fixture's DMX patch (`ma3ReadPatch`, ~line 620)
-
-**What it does:** given an MA3 fixture number, tries `gma.show.property.get(handle, "Patch")` (expecting a `"universe.address"` string), then falls back to separate `"Universe"`/`"Address"` properties.
-
-**Confidence:** moderate — reading object properties via a handle is a well-established MA3 Lua pattern; the exact property name(s) for patch info are the uncertain part.
-
-**Impact if wrong:** the plugin treats "can't read a patch" and "genuinely unpatched" identically — it asks (via confirm dialog) whether to apply the fixture ID only and skip the patch push. So a wrong property name degrades to "always asks to skip the patch," not a crash or wrong data sent.
-
-**How to fix:** patch a fixture in MA3, run `Apply <ip>` against a head linked to it, see if it reads the patch correctly (feedback line will show `patch=U.AAA`) instead of prompting the "not patched" dialog.
-
-## 4. Renaming a fixture (`ma3RenameFixture`, ~line 670)
-
-**What it does:** `gma.show.property.set(handle, "Name", newName)`.
-
-**Confidence:** higher than #2/#3 — property get/set on an object handle is one of the most fundamental, stable patterns in MA3 Lua plugins, and `"Name"` is very likely the literal property name MA3 itself uses.
-
-**Impact if wrong:** `Rename <ip>` reports a failure; nothing else is affected (this is an isolated, opt-in, confirm-gated feature per the spec — "only with an explicit checkbox confirmation each time, never automatic").
-
-## 5. Plugin invocation argument passing (`main(display, arg)`)
-
-**What it does:** assumes `Cmd('Plugin "MiniHead Control" "List"')` calls `main(display, "List")` — i.e. that grandMA3 passes a quoted argument after the plugin name through to the Lua entry point's second parameter, the standard MA2/MA3 plugin convention.
-
-**Confidence:** moderate-high, but exact quoting rules for multi-word arguments (e.g. `"Apply 192.168.1.42"` vs `"Apply" "192.168.1.42"`) may need adjusting to match your console's actual command-line grammar.
-
-**How to verify:** `Cmd('Plugin "MiniHead Control" "Help"')` should print the command list. If `arg` comes through empty or malformed, check the exact invocation syntax your MA3 version expects (this is easy to spot — `Help`'s output is unmistakable when it works).
-
-## 6. What was *not* attempted: a native popup/table window
-
-The spec's §2 layout describes a real docked/popup window with an editable table, status dots, and per-row buttons. This plugin ships v1 as command-driven (feedback-table output + `gma.gui.confirm`/`msgbox`/`textinput` dialogs) instead, deliberately — building custom MA3 windows is done by authoring an XML Layout resource using MA3's own UI object classes (the same system that defines MA3's native skin), which is a distinct, console-side, trial-and-error-driven skill rather than something guessable from Lua API knowledge alone. Every actual control action (discover, link, apply, batch, identify, blackout, rainbow, rename) is fully implemented and independent of whatever UI shell wraps it — turning this into a docked table view is a matter of building that layout in-console and wiring its buttons to the existing commands in `src/MiniHead_Control.lua`, not rewriting any control logic.
-
-## What's solid, cross-checked against firmware source
-
-The HTTP endpoints, request/response shapes, and behavior notes in [`api-reference.md`](api-reference.md) were confirmed by reading `Nomisimo/MiniHead`'s actual firmware source (not just the spec or the companion app's docs, which turned out to disagree with the running code in a few field names) — see that doc for specifics. This is the part of the plugin most likely to already be exactly right.
+If you ever need to verify something else about the API yourself: **run `HelpLua`** first — it's the fastest path to ground truth, faster than guessing or searching third-party docs.

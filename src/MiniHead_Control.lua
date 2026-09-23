@@ -13,13 +13,14 @@
   License: GPL-3.0 (see LICENSE)
 
   --------------------------------------------------------------------------
-  A handful of integration points below talk to MA3-internal state (reading
-  the current command-line fixture selection, reading a fixture's DMX patch,
-  renaming a fixture, opening a socket) using the MA3 Lua API as best known
-  at build time. Each one is marked "VERIFY ON CONSOLE" and fails soft (the
-  plugin keeps working via its typed-input fallback) rather than crashing if
-  the exact call turns out to be wrong on a given MA3 version. Full list and
-  how to fix each one: docs/verification-checklist.md in this repo.
+  Entry point and all grandMA3 Lua API calls below (Printf, Cmd, Confirm,
+  TextInput, GetVar/SetVar, FromAddr, Get/Set, SelectionTable, LuaSocket)
+  are confirmed against grandMA3 2.4.2.2's own HelpLua function export and
+  a live console test session - not guessed. The one remaining soft spot is
+  the exact property name for reading a fixture's DMX patch (tries "Patch"
+  then "Universe"/"Address"), which fails soft into the existing "not
+  patched, apply anyway?" flow rather than crashing. Details:
+  docs/verification-checklist.md in this repo.
   --------------------------------------------------------------------------
 ]]--
 
@@ -241,9 +242,10 @@ function json.decode(s)
 end
 
 -- ============================================================================
--- SECTION 3: Persistence (grandMA3 show variables)
--- Whole head list / settings are stored as one JSON string per global show
--- variable, so this survives save/reload same as the rest of the showfile.
+-- SECTION 3: Persistence (grandMA3 Global Variables)
+-- GetVar/SetVar/GlobalVars confirmed via HelpLua export against 2.4.2.2.
+-- Whole head list / settings are stored as one JSON string per variable, so
+-- this survives save/reload same as the rest of the showfile.
 -- ============================================================================
 
 local SETTINGS_VAR = "MiniHead_Settings"
@@ -261,7 +263,7 @@ end
 
 local function loadSettings()
   local defaults = defaultSettings()
-  local ok, raw = pcall(function() return gma.show.getvar(SETTINGS_VAR) end)
+  local ok, raw = pcall(function() return GetVar(GlobalVars(), SETTINGS_VAR) end)
   if ok and raw and raw ~= "" then
     local data = json.decode(raw)
     if type(data) == "table" then
@@ -275,11 +277,11 @@ local function loadSettings()
 end
 
 local function saveSettings(s)
-  pcall(function() gma.show.setvar(SETTINGS_VAR, json.encode(s)) end)
+  pcall(function() SetVar(GlobalVars(), SETTINGS_VAR, json.encode(s)) end)
 end
 
 local function loadHeads()
-  local ok, raw = pcall(function() return gma.show.getvar(HEADS_VAR) end)
+  local ok, raw = pcall(function() return GetVar(GlobalVars(), HEADS_VAR) end)
   if ok and raw and raw ~= "" then
     local data = json.decode(raw)
     if type(data) == "table" then return data end
@@ -288,24 +290,26 @@ local function loadHeads()
 end
 
 local function saveHeads(list)
-  pcall(function() gma.show.setvar(HEADS_VAR, json.encode(list)) end)
+  pcall(function() SetVar(GlobalVars(), HEADS_VAR, json.encode(list)) end)
 end
 
 -- ============================================================================
 -- SECTION 4: Feedback / error surfacing (spec S6)
+-- Printf writes to the Command Line History; Confirm(..., false) is used as
+-- a blocking "toast" for errors (both confirmed via HelpLua export).
 -- ============================================================================
 
 local function notifyInfo(msg)
-  gma.feedback("[MiniHead] " .. msg)
+  Printf("[MiniHead] " .. msg)
 end
 
 local function notifyError(msg)
   local s = loadSettings()
   if s.cmdlineLogEnabled ~= false then
-    gma.feedback("[MiniHead] ERROR: " .. msg)
+    Printf("[MiniHead] ERROR: " .. msg)
   end
   if s.toastEnabled ~= false then
-    pcall(function() gma.gui.msgbox("MiniHead - Error", msg) end)
+    pcall(function() Confirm("MiniHead - Error", msg, nil, false) end)
   end
 end
 
@@ -324,12 +328,12 @@ end
 local function renderHeadsTable()
   local heads = loadHeads()
   table.sort(heads, function(a, b) return ipSortKey(a.ip) < ipSortKey(b.ip) end)
-  gma.feedback("[MiniHead] " .. #heads .. " head(s) known:")
+  Printf("[MiniHead] " .. #heads .. " head(s) known:")
   if #heads == 0 then
-    gma.feedback("  (none yet - run: Discover <ip>)")
+    Printf("  (none yet - run: Discover <ip>)")
     return
   end
-  gma.feedback(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
+  Printf(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
     "St", "IP", "FixID", "Name", "Fix#", "U.Addr", "Role"))
   for _, h in ipairs(heads) do
     local status = h.online and "On" or "Off"
@@ -337,21 +341,17 @@ local function renderHeadsTable()
     if h.universe and h.addr then
       ua = h.universe .. "." .. string.format("%03d", h.addr)
     end
-    gma.feedback(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
+    Printf(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
       status, h.ip or "-", tostring(h.fixID or "-"), h.name or "-",
       tostring(h.fixtureNo or "-"), ua, h.role or "-"))
   end
 end
 
 -- ============================================================================
--- SECTION 6: HTTP transport
---
--- *** VERIFY ON CONSOLE - docs/verification-checklist.md item #1 ***
--- This is the one function (socketSend) that actually opens a network
--- connection. It targets `gma.socket`, the MA3 Lua socket API. If that
--- name/shape is wrong for your build, this is the only place to fix -
--- everything above and below it (JSON, the API client, the UI/commands)
--- stays the same.
+-- SECTION 6: HTTP transport (LuaSocket)
+-- Confirmed available on this build via `require("socket")` (a live test on
+-- 2.4.2.2 returned a real module table, and io/os are the standard Lua 5.4
+-- libraries - not a custom/guessed API this time).
 -- ============================================================================
 
 local function buildHttpRequest(method, ip, path, bodyStr)
@@ -380,16 +380,14 @@ local function parseHttpResponse(raw)
   return tonumber(code), body
 end
 
--- Best-effort socket I/O. Tries gma.socket (primary guess). Every candidate
--- is wrapped in pcall so a wrong/missing API degrades to a clean error
--- instead of a hard crash.
 local function socketSend(ip, port, requestStr, timeoutMs)
   local ok, resultOrErr = pcall(function()
-    local sock = gma.socket.new("tcp")
-    if not sock then error("gma.socket.new('tcp') returned nil") end
-    if sock.settimeout then sock:settimeout((timeoutMs or 3000) / 1000) end
+    local socket = require("socket")
+    local sock = socket.tcp()
+    if not sock then error("socket.tcp() returned nil") end
+    sock:settimeout((timeoutMs or 3000) / 1000)
     local connected, connErr = sock:connect(ip, port)
-    if connected == false then error(connErr or "connect failed") end
+    if not connected then error(connErr or "connect failed") end
     sock:send(requestStr)
     local chunks = {}
     local guard = 0
@@ -406,7 +404,7 @@ local function socketSend(ip, port, requestStr, timeoutMs)
       end
       if err then break end
     end
-    if sock.close then sock:close() end
+    sock:close()
     return table.concat(chunks)
   end)
   if ok and resultOrErr and #resultOrErr > 0 then
@@ -436,15 +434,13 @@ end
 -- (Firmware/MiniHead/main/core/wifi/*.h) and Firmware/MiniHead/README.md S8,
 -- not just the plugin spec. See docs/api-reference.md for field-by-field
 -- notes and where the spec/App-docs/firmware disagreed.
+--
+-- Every api.* function returns a trailing diagnostic string on failure -
+-- either "HTTP <code>" (reached the head, it rejected the request) or the
+-- raw transport error from socketSend (didn't reach it at all).
 -- ============================================================================
 
 local api = {}
-
--- Every api.* function returns a trailing diagnostic string on failure -
--- either "HTTP <code>" (reached the head, it rejected the request) or the
--- raw transport error from socketSend (didn't reach it at all - this is
--- the string that tells you whether item #1 in verification-checklist.md
--- is the problem). notifyError callers append this when present.
 
 function api.getStatus(ip)
   local ok, code, body, err = httpRequest(ip, "GET", "/api/status", nil, 800)
@@ -500,27 +496,27 @@ end
 
 -- ============================================================================
 -- SECTION 8: MA3-internal integration
---
--- *** VERIFY ON CONSOLE - docs/verification-checklist.md items #2-#4 ***
--- Reading MA3's own patch/selection and writing a fixture name are the
--- other genuinely uncertain integration points (spec S9). Each fails soft:
--- callers fall back to asking the user to type the value instead.
+-- FromAddr / Get / Set / SelectionTable / GetSubfixture all confirmed via
+-- the HelpLua export against 2.4.2.2. The one soft spot left is the exact
+-- property name for a fixture's DMX patch (tries "Patch" then separate
+-- "Universe"/"Address") - fails soft into the existing "not patched, apply
+-- anyway?" confirm flow rather than crashing. See verification-checklist.md.
 -- ============================================================================
 
 -- Reads the DMX universe/address MA3 has patched for a fixture number.
--- Returns universe, address (both nil if unpatched or unreadable).
+-- Returns universe, address (both nil if unpatched, or property name wrong).
 local function ma3ReadPatch(fixtureNo)
   if not fixtureNo then return nil, nil end
   local ok, uni, addr = pcall(function()
-    local handle = gma.show.getobj.handle("Fixture " .. tostring(fixtureNo))
-    if not handle or handle == 0 then return nil, nil end
-    local patchStr = gma.show.property.get(handle, "Patch")
+    local handle = FromAddr("Fixture " .. tostring(fixtureNo))
+    if not handle then return nil, nil end
+    local patchStr = Get(handle, "Patch")
     if patchStr and tostring(patchStr) ~= "" then
       local u, a = tostring(patchStr):match("(%d+)%.(%d+)")
       if u and a then return tonumber(u), tonumber(a) end
     end
-    local u2 = gma.show.property.get(handle, "Universe")
-    local a2 = gma.show.property.get(handle, "Address")
+    local u2 = Get(handle, "Universe")
+    local a2 = Get(handle, "Address")
     if u2 and a2 then return tonumber(u2), tonumber(a2) end
     return nil, nil
   end)
@@ -528,38 +524,42 @@ local function ma3ReadPatch(fixtureNo)
   return nil, nil
 end
 
--- Best-effort read of the current MA3 command-line/floor fixture selection.
--- Unverified global-var name - if it doesn't resolve, callers just fall
--- back to typed input (spec S4: typing must always work standalone).
+-- Reads the current MA3 command-line/floor fixture selection as a list of
+-- Fixture Numbers (FIDs) - via SelectionTable -> GetSubfixture -> Get(.,"FID").
 local function ma3ReadSelectedFixtures()
-  local ok, result = pcall(function() return gma.show.getvar("SelFixtures") end)
-  if ok and result and tostring(result) ~= "" then
-    return parseFixtureRange(tostring(result))
-  end
+  local ok, result = pcall(function()
+    local indices = SelectionTable()
+    local fixtureNumbers = {}
+    for _, idx in ipairs(indices or {}) do
+      local handle = GetSubfixture(idx)
+      if handle then
+        local fid = Get(handle, "FID")
+        if fid then fixtureNumbers[#fixtureNumbers + 1] = tonumber(fid) end
+      end
+    end
+    return fixtureNumbers
+  end)
+  if ok and result and #result > 0 then return result end
   return nil
 end
 
 local function ma3RenameFixture(fixtureNo, newName)
   local ok = pcall(function()
-    local handle = gma.show.getobj.handle("Fixture " .. tostring(fixtureNo))
+    local handle = FromAddr("Fixture " .. tostring(fixtureNo))
     if not handle then error("no handle for Fixture " .. tostring(fixtureNo)) end
-    gma.show.property.set(handle, "Name", newName)
+    Set(handle, "Name", newName)
   end)
   return ok
 end
 
--- Best-effort text prompt (seed IP entry etc.) - tries two plausible API
--- shapes before giving up.
 local function promptText(title, default)
-  local ok, result = pcall(function() return gma.textinput(title, default or "") end)
+  local ok, result = pcall(function() return TextInput(title, default or "") end)
   if ok and result and result ~= "" then return result end
-  local ok2, result2 = pcall(function() return gma.gui.textinput(title, default or "") end)
-  if ok2 and result2 and result2 ~= "" then return result2 end
   return nil
 end
 
 local function confirmDialog(title, msg)
-  local ok, result = pcall(function() return gma.gui.confirm(title, msg) end)
+  local ok, result = pcall(function() return Confirm(title, msg, nil, true) end)
   return ok and result and true or false
 end
 
@@ -604,7 +604,7 @@ local function doDiscover(seedIp)
   if not okStatus then
     notifyError("No response from " .. seedIp .. " on port 80 [" .. tostring(statusErr) .. "]. " ..
       "If the head is reachable by browser but this still fails, the error in [] is from the plugin's " ..
-      "network call (docs/verification-checklist.md item #1) - otherwise check the IP and that the head is powered and on this network.")
+      "network call - otherwise check the IP and that the head is powered and on this network.")
     return
   end
 
@@ -841,7 +841,7 @@ local function doBatch(rangeArg)
 
   notifyInfo("Batch preview (" .. n .. " pair(s), matched by IP order):")
   for i = 1, n do
-    gma.feedback("  Fixture " .. fixtureNumbers[i] .. "  <->  " .. heads[i].ip .. " (" .. (heads[i].name or "?") .. ")")
+    Printf("  Fixture " .. fixtureNumbers[i] .. "  <->  " .. heads[i].ip .. " (" .. (heads[i].name or "?") .. ")")
   end
   if #fixtureNumbers ~= #heads then
     notifyInfo("Note: " .. #fixtureNumbers .. " fixture(s) selected but " .. #heads .. " head(s) known - matching the first " .. n .. ".")
@@ -888,12 +888,12 @@ end
 
 local function doSettings()
   local s = loadSettings()
-  gma.feedback("[MiniHead] Settings:")
-  gma.feedback("  Poll interval: " .. s.pollInterval .. "s (wire Refresh to a timed macro at this interval)")
-  gma.feedback("  Toast on error: " .. tostring(s.toastEnabled))
-  gma.feedback("  Command-line log: " .. tostring(s.cmdlineLogEnabled))
-  gma.feedback("  Subnet scan radius: +/-" .. s.scanRadius)
-  gma.feedback("  Change with: Settings poll <sec> | Settings toast <on|off> | Settings log <on|off> | Settings radius <n>")
+  Printf("[MiniHead] Settings:")
+  Printf("  Poll interval: " .. s.pollInterval .. "s (wire Refresh to a timed macro at this interval)")
+  Printf("  Toast on error: " .. tostring(s.toastEnabled))
+  Printf("  Command-line log: " .. tostring(s.cmdlineLogEnabled))
+  Printf("  Subnet scan radius: +/-" .. s.scanRadius)
+  Printf("  Change with: Settings poll <sec> | Settings toast <on|off> | Settings log <on|off> | Settings radius <n>")
 end
 
 local function doSettingsSet(key, val)
@@ -919,7 +919,7 @@ end
 
 local function doHelp()
   local lines = {
-    "MiniHead Control - commands, e.g. Cmd('Plugin \"MiniHead Control\" \"List\"'):",
+    "MiniHead Control - commands, e.g. Plugin \"MiniHead Control\" \"List\":",
     "  Discover [ip]               - set/seed a head IP, pull /api/heads, scan nearby",
     "  List                        - show the head table",
     "  Refresh                     - re-check online status + re-pull head list",
@@ -937,17 +937,19 @@ local function doHelp()
     "  Settings / Settings <k> <v> - view or change poll interval, toasts, logging, scan radius",
     "  Help                        - this list",
   }
-  for _, l in ipairs(lines) do gma.feedback(l) end
+  for _, l in ipairs(lines) do Printf(l) end
 end
 
 -- ============================================================================
 -- SECTION 12: Entry point
--- Standard MA2/MA3 plugin signature. Invoke e.g.:
---   Cmd('Plugin "MiniHead Control" "List"')
---   Cmd('Plugin "MiniHead Control" "Apply 192.168.1.42"')
+-- Confirmed convention for this build: the script's outermost chunk must
+-- RETURN its entry function(s) - `function Main(...)` alone (without the
+-- trailing `return Main`) is silently never called. Invoke e.g.:
+--   Plugin "MiniHead Control" "List"
+--   Plugin "MiniHead Control" "Apply 192.168.1.42"
 -- ============================================================================
 
-function main(display, arg)
+function Main(display_handle, arg)
   local tokens = tokenize(arg)
   local cmd = (tokens[1] or ""):lower()
   table.remove(tokens, 1)
@@ -981,6 +983,8 @@ function main(display, arg)
     if tokens[1] and tokens[2] then doSettingsSet(tokens[1], tokens[2]) else doSettings() end
   elseif cmd == "help" then doHelp()
   else
-    notifyError("Unknown MiniHead command: \"" .. cmd .. "\". Try: Cmd('Plugin \"MiniHead Control\" \"Help\"')")
+    notifyError("Unknown MiniHead command: \"" .. cmd .. "\". Try: Plugin \"MiniHead Control\" \"Help\"")
   end
 end
+
+return Main

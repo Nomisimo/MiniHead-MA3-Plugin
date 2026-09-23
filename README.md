@@ -15,6 +15,8 @@
 
 Full feature spec: [`MiniHead-MA3-Plugin-Spec.md`](MiniHead-MA3-Plugin-Spec.md).
 
+**Status: confirmed working end-to-end against real grandMA3 onPC 2.4.2.2 and real MiniHead hardware** — see [docs/verification-checklist.md](docs/verification-checklist.md) for exactly what's been tested and the one remaining soft spot (the exact property name for reading a fixture's DMX patch, which fails soft either way).
+
 ---
 
 ## Quick start
@@ -23,12 +25,12 @@ Full feature spec: [`MiniHead-MA3-Plugin-Spec.md`](MiniHead-MA3-Plugin-Spec.md).
 git clone https://github.com/Nomisimo/MiniHead-MA3-Plugin.git
 ```
 
-→ Install: [docs/installation.md](docs/installation.md) (XML import, or guaranteed-working manual paste into the console's Lua editor)
+→ Install: [docs/installation.md](docs/installation.md) — copy `src/MiniHead_Control.lua` + `.xml` into your `gma3_library/datapools/plugins/MiniHead_Control/` folder and import via the Plugin Pool.
 
-Then, on the console command line:
+Then, on the console command line (replace `4` with whatever pool slot it imported to — **use the number, not the name**; `Plugin "MiniHead Control" ...` returns `Illegal object` on this build):
 
 ```
-Cmd('Plugin "MiniHead Control" "Help"')
+Plugin 4 "Help"
 ```
 
 ---
@@ -53,19 +55,13 @@ Cmd('Plugin "MiniHead Control" "Help"')
 | `Settings [key value]` | View/change poll interval, toasts, command-line logging, scan radius |
 | `Help` | Print this list in-console |
 
-Every command runs as `Cmd('Plugin "MiniHead Control" "<command>"')` — put the ones you use often on executor buttons. See [docs/installation.md](docs/installation.md) for wiring examples.
+Run each as `Plugin <pool-number> "<command>"`, e.g. `Plugin 4 "Apply 192.168.1.50"`. Output goes to the **Command Line History** window. See [docs/installation.md](docs/installation.md) for details and executor-button wiring.
 
 ---
 
 ## Why command-driven, not a docked window
 
-The spec calls for a native popup/dockable table view. This v1 ships as command + feedback-table + dialog driven instead: building a real MA3 window means authoring an XML Layout with MA3's own UI object classes, a console-side, trial-and-error skill that isn't something to guess blind from outside a real console. Every actual control action is fully implemented and independent of the UI shell around it — see [docs/verification-checklist.md](docs/verification-checklist.md#6-what-was-not-attempted-a-native-popuptable-window).
-
-## Verification status
-
-This plugin was built and unit-tested (JSON, HTTP parsing, command dispatch, persistence, all against mocked firmware responses shaped from the real `Nomisimo/MiniHead` source) without access to an actual grandMA3 console or onPC. The handful of calls into MA3's own Lua host API (networking, reading the current selection/patch, renaming a fixture) are best-effort and fail soft rather than crash — see **[docs/verification-checklist.md](docs/verification-checklist.md)** for exactly what to check first on a real console and how to fix it if something doesn't match.
-
-The HTTP API this plugin calls was cross-checked against the actual firmware source (not just the spec) — see [docs/api-reference.md](docs/api-reference.md).
+The spec calls for a native popup/dockable table view. This ships command + feedback-table + dialog driven instead: building a real MA3 window means authoring an XML Layout with MA3's own UI object classes, a console-side, trial-and-error skill distinct from the plugin scripting API. Every actual control action is fully implemented and independent of the UI shell around it.
 
 ---
 

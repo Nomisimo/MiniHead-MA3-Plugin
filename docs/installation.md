@@ -1,54 +1,65 @@
 # Installation
 
-## Method A — Import the XML (try this first)
+Confirmed working on grandMA3 onPC 2.4.2.2. Uses the file-based plugin import method (not manual copy-paste into the console's Lua editor — that also works, but the XML+file method is quicker to update and is what's documented here).
 
-1. Copy [`src/MiniHead_Control.xml`](../src/MiniHead_Control.xml) to a USB stick, or a location the console can reach.
-2. On the console (or onPC): open the **Plugin Pool**.
-3. Right-click an empty slot → **Import** → select `MiniHead_Control.xml`.
-4. If it imports without error, skip to [Wiring it to a button](#wiring-it-to-a-button).
+## 1. Copy the plugin files into place
 
-If the import fails or the plugin doesn't appear correctly, the XML wrapper's tag structure hasn't been confirmed against a real console — use Method B, which is guaranteed to work regardless.
+grandMA3 loads plugins from `gma3_library/datapools/plugins/<PluginFolderName>/` on the same drive as the running installation:
 
-## Method B — Manual paste (guaranteed to work)
+- **macOS:** `~/MALightingTechnology/gma3_library/datapools/plugins/`
+- **Windows:** `C:\ProgramData\MALightingTechnology\gma3_library\datapools\plugins\`
 
-1. On the console (or onPC): open the **Plugin Pool**.
-2. Right-click an empty slot → **New**.
-3. Open the new plugin's Lua editor.
-4. Open [`src/MiniHead_Control.lua`](../src/MiniHead_Control.lua) in a text editor, select all, copy.
-5. Paste the full contents into the console's Lua editor, replacing whatever's there.
-6. Name the plugin **MiniHead Control** (the code assumes this name in its own usage messages — cosmetic only, doesn't affect function).
-7. Close the editor. The console's Lua parser will flag any syntax error immediately at this point — there shouldn't be any (see [Verification checklist](verification-checklist.md) for how to isolate a runtime error instead, which behaves differently).
-
-## Wiring it to a button
-
-The plugin is entirely command-driven — there's no popup window in v1 (see [verification-checklist.md](verification-checklist.md) for why). Everything happens through `Cmd()` calls, so put the ones you use often on executor buttons or a macro page:
+Create a folder there called `MiniHead_Control` and copy both files from this repo's [`src/`](../src/) into it:
 
 ```
-Cmd('Plugin "MiniHead Control" "List"')
-Cmd('Plugin "MiniHead Control" "Discover"')
-Cmd('Plugin "MiniHead Control" "Refresh"')
-Cmd('Plugin "MiniHead Control" "IdentifyAll"')
-Cmd('Plugin "MiniHead Control" "BlackoutAll"')
-Cmd('Plugin "MiniHead Control" "RainbowAll"')
+gma3_library/datapools/plugins/MiniHead_Control/MiniHead_Control.lua
+gma3_library/datapools/plugins/MiniHead_Control/MiniHead_Control.xml
 ```
 
-For per-head actions, either type the full command on the command line with the head's IP, or make one button per head once your rig is patched:
+## 2. Import it in the console
+
+1. Open the **Plugin Pool**.
+2. Select an empty slot → **Import**.
+3. Navigate to `MiniHead_Control.xml` in the folder above → select it → **Import**.
+4. The plugin appears in the pool as **MiniHead Control**, at whatever slot number you imported it to.
+
+## 3. Run it
+
+Plugins on this build are invoked **by pool number**, not by name — `Plugin "MiniHead Control" ...` (name in quotes) returned `Illegal object` in testing, even though it's documented as valid syntax. Use the number shown on its pool tile:
 
 ```
-Cmd('Plugin "MiniHead Control" "Apply 192.168.1.42"')
-Cmd('Plugin "MiniHead Control" "Identify 192.168.1.42"')
+Plugin 4 "Help"
 ```
 
-Run `Cmd('Plugin "MiniHead Control" "Help"')` any time for the full command list, or see the table in the [README](../README.md#commands).
+(replace `4` with your plugin's actual slot number) — this prints the full command list to the **Command Line History** window. If you don't have that window open: `Menu "Addwindow"` → add a Command Line History window, or check the console's default screen layout, since that's where all of this plugin's output goes (not the on-screen command line's single input row, and not the System Monitor).
+
+## Commands
+
+See the table in the [README](../README.md#commands), or just run `Plugin <n> "Help"`. Per-head commands take the head's IP, e.g.:
+
+```
+Plugin 4 "Discover 192.168.1.50"
+Plugin 4 "List"
+Plugin 4 "SetFixture 192.168.1.50 12"
+Plugin 4 "Apply 192.168.1.50"
+```
+
+For convenience, put the ones you use often on executor buttons or a macro page instead of retyping them.
 
 ## First run
 
-Invoking the plugin with no argument (or `List` before anything is known) walks you through first-run setup automatically: it prompts for one head's IP, connects, pulls the rest of the fleet from that head's `/api/heads`, and does a bounded scan of nearby addresses for anything not in that list. After that, the head list is saved into the showfile — no rediscovery needed next time you open it, per the spec.
+Invoking the plugin with no argument (`Plugin 4`) before anything is known walks you through first-run setup automatically: it prompts for one head's IP via a text-input dialog, connects, pulls the rest of the fleet from that head's `/api/heads`, and does a bounded scan of nearby addresses for anything not in that list. After that, the head list is saved into the showfile via grandMA3's Global Variables — no rediscovery needed next time you open it.
 
 ## Auto-refresh (optional)
 
-The plugin's `Refresh` command re-checks online status and re-pulls the head list — it's a plain command, not a background timer (see checklist item — MA3 plugins invoked once don't keep running). To get periodic polling, put `Cmd('Plugin "MiniHead Control" "Refresh"')` on a macro or executor with MA3's own timer/loop functionality, at whatever interval you set via `Settings poll <seconds>` (default 20s, matching the spec's 15–30s target).
+`Refresh` re-checks online status and re-pulls the head list — it's a plain command, not a background timer. To get periodic polling, put `Plugin <n> "Refresh"` on a macro or executor with MA3's own timer/loop functionality, at whatever interval you set via `Settings poll <seconds>` (default 20s).
+
+## Updating the plugin after editing the `.lua` file
+
+If you edit `MiniHead_Control.lua` on disk after importing it, the console's copy won't update automatically. Either:
+- Delete the plugin from the pool and re-import (guaranteed to pick up the new file), or
+- Try the `ReloadAllPlugins` keyword on the command line first (faster if it works for your setup).
 
 ## Uninstall
 
-Delete the plugin object from the Plugin Pool. The two show variables it stores data in (`MiniHead_Settings`, `MiniHead_Heads`) are harmless leftover strings in the showfile if you don't clean them up — delete them from Global Variables if you want a clean slate.
+Delete the plugin object from the Plugin Pool. The two Global Variables it stores data in (`MiniHead_Settings`, `MiniHead_Heads`) are harmless leftover strings in the showfile if you don't clean them up.
