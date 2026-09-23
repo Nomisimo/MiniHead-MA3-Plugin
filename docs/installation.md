@@ -28,10 +28,12 @@ gma3_library/datapools/plugins/MiniHead_Control/MiniHead_Control.xml
 Plugins on this build are invoked **by pool number**, not by name — `Plugin "MiniHead Control" ...` (name in quotes) returned `Illegal object` in testing, even though it's documented as valid syntax. Use the number shown on its pool tile:
 
 ```
-Plugin 4 "Help"
+Plugin 4 "Menu"
 ```
 
-(replace `4` with your plugin's actual slot number) — this prints the full command list to the **Command Line History** window. If you don't have that window open: `Menu "Addwindow"` → add a Command Line History window, or check the console's default screen layout, since that's where all of this plugin's output goes (not the on-screen command line's single input row, and not the System Monitor).
+(replace `4` with your plugin's actual slot number) — this opens a clickable menu: buttons for Discover/Refresh/Identify All/Blackout All/Rainbow All/Settings, plus one button per known head. Clicking a head opens a dialog for it with an editable Fix# field and Apply/Identify/Rename buttons. No typing needed from here on.
+
+If you'd rather drive it from the command line instead, `Plugin 4 "Help"` prints the full command list to the **Command Line History** window. If you don't have that window open: `Menu "Addwindow"` → add a Command Line History window, since that's where all of this plugin's text output goes (not the on-screen command line's single input row, and not the System Monitor).
 
 ## Commands
 
@@ -44,7 +46,16 @@ Plugin 4 "SetFixture 192.168.1.50 12"
 Plugin 4 "Apply 192.168.1.50"
 ```
 
-For convenience, put the ones you use often on executor buttons or a macro page instead of retyping them.
+`SetFixture` sets both the MA3 fixture link *and* the fixture ID pushed to the head — they're the same number, not two separate fields.
+
+## Macros / executor buttons (optional)
+
+For one-touch access to a specific action without opening `Menu` at all, wrap a command in a **Macro** and assign it to an executor button or view button:
+
+1. Create a Macro containing the command line text, e.g. `Plugin 4 "IdentifyAll"` or `Plugin 4 "BlackoutAll"`.
+2. Assign it to a key: press **Assign**, then **MA** + the Macro key, then the button/executor you want it on. (See MA Lighting's [Assign Macros to Keys and Buttons](https://help.malighting.com/grandMA3/2.0/HTML/macro_assign.html).)
+
+This is separate from `Menu` and doesn't require it — useful for the handful of actions (Blackout All, Identify All) you want as a single physical press during a show, while `Menu` stays the general-purpose way to work with individual heads.
 
 ## First run
 

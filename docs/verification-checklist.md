@@ -19,6 +19,10 @@ Updated after a live test session against a real grandMA3 onPC 2.4.2.2 installat
 
 All of the above were verified with a throwaway diagnostic plugin (`Echo`/`Printf`/environment probes) before being wired into the real plugin, and the full command set (`Help`, `Discover`, `List`, `SetFixture`, `Apply`, `Rename`, `IdentifyAll`, `BlackoutAll`, `RainbowAll`, `Settings`) was exercised via a local Lua-interpreter test harness with the confirmed API stubbed out, before being tested live. See the repo's commit history for both.
 
+## Not yet live-tested: the `Menu` command
+
+`Menu` (and the bare `Plugin <n>` invocation, which now opens it) builds a `MessageBox` dialog with a dynamically generated button per known head, and a second dialog per head with an editable `Fix#` input plus Apply/Identify/Rename buttons. The `MessageBox` mechanism itself (multi-button dialogs, named input fields, reading `result.result` / `result.inputs[name]` back) is confirmed by MA Lighting's own documented example. The *specific* dialog shapes this plugin builds (variable-length button lists, the input-field round trip) were verified against a local Lua interpreter with `MessageBox` mocked (see the repo's test harnesses), but not yet seen rendered on the actual console. If a button list with 6+ entries renders oddly, or the input field doesn't prefill/round-trip as expected, that's the first thing to check live — `List`/`Discover`/`Apply`/etc. (the typed command path) are unaffected either way, since `Menu` is purely an additional UI layer on top of the same, already-hardware-confirmed logic.
+
 ## One soft spot left: reading a fixture's DMX patch
 
 `ma3ReadPatch()` in `src/MiniHead_Control.lua` reads a fixture's universe/address via `Get(handle, "Patch")` (expecting a `"universe.address"` string), falling back to separate `Get(handle, "Universe")` / `Get(handle, "Address")` properties. The **mechanism** (`FromAddr` + `Get`) is confirmed real and correct — the exact **property name** MA3 uses for a fixture's patch is the one piece not yet confirmed against a real patched fixture.

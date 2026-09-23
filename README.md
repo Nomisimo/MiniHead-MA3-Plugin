@@ -30,8 +30,10 @@ git clone https://github.com/Nomisimo/MiniHead-MA3-Plugin.git
 Then, on the console command line (replace `4` with whatever pool slot it imported to — **use the number, not the name**; `Plugin "MiniHead Control" ...` returns `Illegal object` on this build):
 
 ```
-Plugin 4 "Help"
+Plugin 4 "Menu"
 ```
+
+That opens the clickable UI — no typing needed from here on. Or `Plugin 4 "Help"` for the full command list if you'd rather drive it from the command line / a macro.
 
 ---
 
@@ -39,11 +41,11 @@ Plugin 4 "Help"
 
 | Command | Does |
 |---|---|
+| `Menu` | Open the clickable menu — buttons + an editable Fix# field, no typing needed |
 | `Discover [ip]` | Seed a head IP, pull `/api/heads`, scan nearby addresses for extras |
-| `List` | Show the head table (status, IP, MAC, fixID, name, linked fixture, patch) |
+| `List` | Show the head table as plain text (status, IP, name, linked fixture, patch) |
 | `Refresh` | Re-check online status and re-pull the head list |
-| `SetFixID <ip> <n>` | Edit a head's fixture-ID field (local; push with `Apply`) |
-| `SetFixture <ip> <n>` | Link a head to MA3 fixture number `n` |
+| `SetFixture <ip> <n>` | Link a head to MA3 fixture number `n` — this is also what gets pushed to the head as its fixture ID; the two are the same number, not tracked separately |
 | `UseSelection <ip>` | Fill `SetFixture` from the current MA3 floor/command-line selection |
 | `Apply <ip>` | Push fixID + patch (from the linked fixture) to that head |
 | `Identify <ip>` / `IdentifyAll` | Flash one head, or all heads |
@@ -59,9 +61,13 @@ Run each as `Plugin <pool-number> "<command>"`, e.g. `Plugin 4 "Apply 192.168.1.
 
 ---
 
-## Why command-driven, not a docked window
+## UI: clickable, not a persistent docked window
 
-The spec calls for a native popup/dockable table view. This ships command + feedback-table + dialog driven instead: building a real MA3 window means authoring an XML Layout with MA3's own UI object classes, a console-side, trial-and-error skill distinct from the plugin scripting API. Every actual control action is fully implemented and independent of the UI shell around it.
+The spec calls for a native popup/dockable table view that stays open. What's here instead is a real point-and-click UI (`Menu`) built on grandMA3's `MessageBox` API — a main menu listing every head as a button, and a per-head dialog with an editable Fix# field plus Apply/Identify/Rename buttons — rather than typed commands. It's not a *persistent* docked window: each screen is a modal dialog you click through, not something left open on a screen permanently while patching.
+
+A true always-on docked table would mean authoring an MA3 **Layout View** or **UI Layout** — real, Lua-drivable features (community plugins like [Build-A-Layout](https://addondesk.com/product/build-a-layout/) generate Layout Views programmatically), but a separate, larger research task from what's built here. See [docs/verification-checklist.md](docs/verification-checklist.md).
+
+For one-touch access without opening the menu at all, put individual commands on **Macros** assigned to executor buttons — see [docs/installation.md](docs/installation.md#macros--executor-buttons-optional).
 
 ---
 

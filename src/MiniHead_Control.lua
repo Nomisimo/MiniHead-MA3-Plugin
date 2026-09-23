@@ -333,16 +333,16 @@ local function renderHeadsTable()
     Printf("  (none yet - run: Discover <ip>)")
     return
   end
-  Printf(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
-    "St", "IP", "FixID", "Name", "Fix#", "U.Addr", "Role"))
+  Printf(string.format("  %-3s %-15s %-16s %-5s %-9s %-8s",
+    "St", "IP", "Name", "Fix#", "U.Addr", "Role"))
   for _, h in ipairs(heads) do
     local status = h.online and "On" or "Off"
     local ua = "--"
     if h.universe and h.addr then
       ua = h.universe .. "." .. string.format("%03d", h.addr)
     end
-    Printf(string.format("  %-3s %-15s %-6s %-16s %-5s %-9s %-8s",
-      status, h.ip or "-", tostring(h.fixID or "-"), h.name or "-",
+    Printf(string.format("  %-3s %-15s %-16s %-5s %-9s %-8s",
+      status, h.ip or "-", h.name or "-",
       tostring(h.fixtureNo or "-"), ua, h.role or "-"))
   end
 end
@@ -612,18 +612,21 @@ local function doDiscover(seedIp)
   settings.seedIP = seedIp
   saveSettings(settings)
 
+  -- fixtureNo defaults to the head's own stored fixID (spec S4) until the
+  -- user links it to something else or a prior session already did.
   local heads = {}
   local okHeads, list = api.getHeads(seedIp)
   if okHeads and list then
     for _, h in ipairs(list) do
       heads[#heads + 1] = {
-        mac = h.mac, ip = h.ip, name = h.name, fixID = h.fixID,
-        role = h.role, fixtureNo = nil, online = true,
+        mac = h.mac, ip = h.ip, name = h.name,
+        fixtureNo = (h.fixID and h.fixID > 0) and h.fixID or nil,
+        role = h.role, online = true,
       }
     end
     notifyInfo(#heads .. " head(s) found via " .. seedIp .. ".")
   else
-    heads[1] = { mac = "", ip = seedIp, name = "Head", fixID = 0, role = "LEADER", fixtureNo = nil, online = true }
+    heads[1] = { mac = "", ip = seedIp, name = "Head", fixtureNo = nil, role = "LEADER", online = true }
     notifyInfo("Connected to " .. seedIp .. " but it returned no /api/heads list - added it alone.")
   end
 
@@ -668,8 +671,9 @@ local function doRefresh()
     for _, h in ipairs(list) do
       local prev = prevByIp[h.ip]
       fresh[#fresh + 1] = {
-        mac = h.mac, ip = h.ip, name = h.name, fixID = h.fixID, role = h.role,
-        fixtureNo = prev and prev.fixtureNo or nil, online = true,
+        mac = h.mac, ip = h.ip, name = h.name, role = h.role,
+        fixtureNo = prev and prev.fixtureNo or ((h.fixID and h.fixID > 0) and h.fixID or nil),
+        online = true,
       }
     end
     heads = fresh
@@ -689,16 +693,8 @@ end
 -- SECTION 10: Apply logic (single + batch)
 -- ============================================================================
 
-local function doSetFixID(ip, val)
-  local head, _, heads = findHeadByIp(ip)
-  if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
-  local n = tonumber(val)
-  if not n then notifyError("Fixture ID must be a number."); return end
-  head.fixID = n
-  saveHeads(heads)
-  notifyInfo(ip .. " fixID field set to " .. n .. " (not yet pushed - run: Apply " .. ip .. ")")
-end
-
+-- FixID (pushed to the ESP) and MA3 Fixture Number are the same number -
+-- one field, no separate "set the ESP's ID" step.
 local function doSetFixture(ip, val)
   local head, _, heads = findHeadByIp(ip)
   if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
@@ -706,7 +702,7 @@ local function doSetFixture(ip, val)
   head.fixtureNo = n
   saveHeads(heads)
   if n then
-    notifyInfo(ip .. " linked to MA3 Fixture " .. n .. ".")
+    notifyInfo(ip .. " linked to MA3 Fixture " .. n .. " (not yet pushed - run: Apply " .. ip .. ")")
   else
     notifyInfo(ip .. " fixture link cleared.")
   end
@@ -742,7 +738,7 @@ local function doApply(ip)
     end
   end
 
-  local okId, idErr = api.setFixID(head.ip, head.fixID or 0)
+  local okId, idErr = api.setFixID(head.ip, head.fixtureNo or 0)
   if not okId then
     notifyError("Failed to set fixture ID on " .. head.ip .. " [" .. tostring(idErr) .. "].")
     return
@@ -758,10 +754,10 @@ local function doApply(ip)
       return
     end
     head.universe, head.addr = universe, addr
-    notifyInfo("Applied to " .. head.ip .. ": fixID=" .. tostring(head.fixID) ..
+    notifyInfo("Applied to " .. head.ip .. ": Fix#=" .. tostring(head.fixtureNo) ..
       ", patch=" .. universe .. "." .. string.format("%03d", addr))
   else
-    notifyInfo("Applied to " .. head.ip .. ": fixID=" .. tostring(head.fixID) .. " (no patch pushed).")
+    notifyInfo("Applied to " .. head.ip .. ": Fix#=" .. tostring(head.fixtureNo) .. " (no patch pushed).")
   end
 
   saveHeads(heads)
@@ -920,13 +916,13 @@ end
 local function doHelp()
   local lines = {
     "MiniHead Control - commands, e.g. Plugin \"MiniHead Control\" \"List\":",
+    "  Menu                        - open the clickable menu (buttons + fields, no typing)",
     "  Discover [ip]               - set/seed a head IP, pull /api/heads, scan nearby",
-    "  List                        - show the head table",
+    "  List                        - show the head table (plain text)",
     "  Refresh                     - re-check online status + re-pull head list",
-    "  SetFixID <ip> <n>           - edit a row's fixture ID field (local only)",
-    "  SetFixture <ip> <n>         - link a row to MA3 fixture number n",
+    "  SetFixture <ip> <n>         - link a head to MA3 fixture number n (also its fixture ID - same number)",
     "  UseSelection <ip>           - fill SetFixture from the current MA3 selection",
-    "  Apply <ip>                  - push fixID + patch to that head",
+    "  Apply <ip>                  - push fixture number + patch to that head",
     "  Identify <ip>               - flash one head",
     "  IdentifyAll                 - flash all heads",
     "  BlackoutAll                 - blackout all heads",
@@ -938,6 +934,116 @@ local function doHelp()
     "  Help                        - this list",
   }
   for _, l in ipairs(lines) do Printf(l) end
+end
+
+-- ============================================================================
+-- SECTION 11.5: Interactive menu (MessageBox-based clickable UI)
+-- Not a persistent docked table (that needs XML Layout authoring, a
+-- different, unverified undertaking - see verification-checklist.md) but a
+-- real point-and-click UI built entirely on the confirmed MessageBox API:
+-- a main menu listing heads as buttons, and a per-head dialog with an
+-- editable Fix# field plus Apply/Identify/Rename buttons.
+-- doMenu and doEditHead call each other, so both are forward-declared and
+-- every call back into either one is a `return`ed tail call - the pair can
+-- be clicked back and forth indefinitely without growing the Lua stack.
+-- ============================================================================
+
+local doMenu
+local doEditHead
+
+doEditHead = function(ip)
+  local head, _, heads = findHeadByIp(ip)
+  if not head then notifyError("No known head at " .. tostring(ip) .. "."); return doMenu() end
+
+  local ua = "not read yet"
+  if head.universe and head.addr then
+    ua = head.universe .. "." .. string.format("%03d", head.addr)
+  end
+  local msg = "IP: " .. head.ip .. "\n" ..
+    "MAC: " .. ((head.mac and head.mac ~= "") and head.mac or "-") .. "\n" ..
+    "Role: " .. (head.role or "-") .. "   Status: " .. (head.online and "Online" or "Offline") .. "\n" ..
+    "Last applied patch: " .. ua
+
+  local result = MessageBox({
+    title = "MiniHead - " .. (head.name or head.ip),
+    message = msg,
+    inputs = { { name = "Fix#", value = tostring(head.fixtureNo or "") } },
+    commands = {
+      { value = 1, name = "Apply" },
+      { value = 2, name = "Identify" },
+      { value = 3, name = "Rename" },
+      { value = 4, name = "Back" },
+    },
+  })
+
+  if not result or not result.success then return doMenu() end
+
+  local newFixStr = result.inputs and result.inputs["Fix#"]
+  if newFixStr ~= nil and newFixStr ~= tostring(head.fixtureNo or "") then
+    doSetFixture(ip, newFixStr)
+  end
+
+  if result.result == 1 then
+    doApply(ip)
+    return doEditHead(ip)
+  elseif result.result == 2 then
+    doIdentify(ip)
+    return doEditHead(ip)
+  elseif result.result == 3 then
+    doRename(ip)
+    return doEditHead(ip)
+  else
+    return doMenu()
+  end
+end
+
+doMenu = function()
+  local heads = loadHeads()
+  table.sort(heads, function(a, b) return ipSortKey(a.ip) < ipSortKey(b.ip) end)
+
+  local msg
+  if #heads == 0 then
+    msg = "No heads known yet. Tap Discover to find one."
+  else
+    local lines = {}
+    for _, h in ipairs(heads) do
+      lines[#lines + 1] = string.format("%s  %-15s  Fix#%-4s  %s",
+        h.online and "On " or "Off", h.ip, tostring(h.fixtureNo or "-"), h.name or "-")
+    end
+    msg = table.concat(lines, "\n")
+  end
+
+  local commands = {
+    { value = 1, name = "Discover" },
+    { value = 2, name = "Refresh" },
+    { value = 3, name = "Identify All" },
+    { value = 4, name = "Blackout All" },
+    { value = 5, name = "Rainbow All" },
+    { value = 6, name = "Settings" },
+  }
+  local ipByValue = {}
+  for i, h in ipairs(heads) do
+    local v = 100 + i
+    commands[#commands + 1] = { value = v, name = "Edit " .. h.ip }
+    ipByValue[v] = h.ip
+  end
+
+  local result = MessageBox({
+    title = "MiniHead Control",
+    message = msg,
+    commands = commands,
+  })
+  if not result or not result.success then return end
+
+  local r = result.result
+  if r == 1 then doDiscover(nil); return doMenu()
+  elseif r == 2 then doRefresh(); return doMenu()
+  elseif r == 3 then doIdentifyAll(); return doMenu()
+  elseif r == 4 then doBlackoutAll(); return doMenu()
+  elseif r == 5 then doRainbowAll(true); return doMenu()
+  elseif r == 6 then doSettings(); return doMenu()
+  elseif ipByValue[r] then return doEditHead(ipByValue[r])
+  end
 end
 
 -- ============================================================================
@@ -958,16 +1064,14 @@ function Main(display_handle, arg)
     local settings = loadSettings()
     if settings.seedIP == "" and #loadHeads() == 0 then
       doDiscover(nil)
-      return
     end
-    renderHeadsTable()
-    return
+    return doMenu()
   end
 
-  if cmd == "list" then renderHeadsTable()
+  if cmd == "menu" then return doMenu()
+  elseif cmd == "list" then renderHeadsTable()
   elseif cmd == "discover" then doDiscover(tokens[1])
   elseif cmd == "refresh" then doRefresh()
-  elseif cmd == "setfixid" then doSetFixID(tokens[1], tokens[2])
   elseif cmd == "setfixture" then doSetFixture(tokens[1], tokens[2])
   elseif cmd == "useselection" then doUseSelection(tokens[1])
   elseif cmd == "apply" then doApply(tokens[1])
