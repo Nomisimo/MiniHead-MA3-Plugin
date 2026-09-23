@@ -24,6 +24,13 @@
   --------------------------------------------------------------------------
 ]]--
 
+-- Top-level plugin varargs - needed for the custom window (Section 11.6):
+-- myHandle identifies this component to the UI system (.PluginComponent),
+-- signalTable is where click-handler functions are registered by name.
+-- Confirmed pattern from two real community plugins (BakaCowpoke/GrandMA3-Lua).
+local pluginName, componentName, signalTable, myHandle =
+  select(1, ...), select(2, ...), select(3, ...), select(4, ...)
+
 -- ============================================================================
 -- SECTION 1: Small utilities
 -- ============================================================================
@@ -917,6 +924,7 @@ local function doHelp()
   local lines = {
     "MiniHead Control - commands, e.g. Plugin \"MiniHead Control\" \"List\":",
     "  Menu                        - open the clickable menu (buttons + fields, no typing)",
+    "  Window                      - open the full custom window (experimental, see docs)",
     "  Discover [ip]               - set/seed a head IP, pull /api/heads, scan nearby",
     "  List                        - show the head table (plain text)",
     "  Refresh                     - re-check online status + re-pull head list",
@@ -1047,6 +1055,260 @@ doMenu = function()
 end
 
 -- ============================================================================
+-- SECTION 11.6: Custom persistent-feeling window (experimental)
+--
+-- *** NOT YET LIVE-TESTED - see docs/verification-checklist.md ***
+-- Built on GetFocusDisplay().ScreenOverlay:Append('ClassName') + dot-notation
+-- properties + .PluginComponent/.Clicked/signalTable for click handling -
+-- confirmed real by two independent working community plugins and grandMA3's
+-- own shipped message_box.uixml (same class names: TitleBar, TitleButton,
+-- CloseButton, DialogFrame, ScrollBox, ScrollBarV, UILayoutGrid, Button,
+-- LineEdit). This is NOT a docked/ScreenContent window - confirmed via
+-- grandMA3's own add_window.lua that ScreenContent window types are a fixed,
+-- engine-built list with no plugin registration hook. It's an overlay that
+-- stays open (AutoClose='No') for as long as its Lua task keeps running.
+--
+-- v1 behavior: row/global actions call straight into the already
+-- hardware-verified do* functions and leave the window open as-is; the
+-- displayed data is a snapshot from when the window opened - close and
+-- reopen (Window command) to see fresh state. Only Close rebuilds nothing
+-- and just tears the window down.
+-- ============================================================================
+
+local function doWindow()
+  local heads = loadHeads()
+  table.sort(heads, function(a, b) return ipSortKey(a.ip) < ipSortKey(b.ip) end)
+
+  local continue = false
+  local fixInputs = {}
+
+  local ok, err = pcall(function()
+
+    local baseLayer = GetFocusDisplay().ScreenOverlay:Append('BaseInput')
+    baseLayer.H = 560
+    baseLayer.W = 920
+    baseLayer.Columns = 1
+    baseLayer.Rows = 5
+    baseLayer[1][1].SizePolicy = 'Fixed'; baseLayer[1][1].Size = 36  -- title bar
+    baseLayer[1][2].SizePolicy = 'Fixed'; baseLayer[1][2].Size = 44  -- header actions
+    baseLayer[1][3].SizePolicy = 'Stretch'                            -- head list
+    baseLayer[1][4].SizePolicy = 'Fixed'; baseLayer[1][4].Size = 44  -- global actions
+    baseLayer[1][5].SizePolicy = 'Fixed'; baseLayer[1][5].Size = 40  -- footer
+    baseLayer.AutoClose = 'No'
+    baseLayer.CloseOnEscape = 'Yes'
+
+    -- Title bar
+    local titleBar = baseLayer:Append('TitleBar')
+    titleBar.Columns = 2
+    titleBar.Rows = 1
+    titleBar.Anchors = '0,0'
+    titleBar[2][2].SizePolicy = 'Fixed'
+    titleBar[2][2].Size = 50
+    titleBar.Texture = 'corner2'
+    titleBar.Transparent = "No"
+
+    local titleIcon = titleBar:Append('TitleButton')
+    titleIcon.Font = 'Regular20'
+    titleIcon.Text = 'MiniHead Control'
+    titleIcon.Texture = 'corner1'
+    titleIcon.Anchors = '0,0'
+
+    local titleClose = titleBar:Append('CloseButton')
+    titleClose.Anchors = '1,0'
+    titleClose.Texture = 'corner2'
+    titleClose.PluginComponent = myHandle
+    titleClose.Clicked = 'MH_CloseClicked'
+
+    -- Header actions: Discover / Refresh / Settings
+    local headerGrid = baseLayer:Append('UILayoutGrid')
+    headerGrid.Anchors = '0,1'
+    headerGrid.Columns = 3
+    headerGrid.Rows = 1
+
+    local discoverBtn = headerGrid:Append('Button')
+    discoverBtn.Anchors = '0,0'
+    discoverBtn.Text = 'Discover Heads'
+    discoverBtn.HasHover = 'Yes'
+    discoverBtn.PluginComponent = myHandle
+    discoverBtn.Clicked = 'MH_DiscoverClicked'
+
+    local refreshBtn = headerGrid:Append('Button')
+    refreshBtn.Anchors = '1,0'
+    refreshBtn.Text = 'Refresh'
+    refreshBtn.HasHover = 'Yes'
+    refreshBtn.PluginComponent = myHandle
+    refreshBtn.Clicked = 'MH_RefreshClicked'
+
+    local settingsBtn = headerGrid:Append('Button')
+    settingsBtn.Anchors = '2,0'
+    settingsBtn.Text = 'Settings'
+    settingsBtn.HasHover = 'Yes'
+    settingsBtn.PluginComponent = myHandle
+    settingsBtn.Clicked = 'MH_SettingsClicked'
+
+    -- Scrollable head list
+    local dialog = baseLayer:Append('DialogFrame')
+    dialog.Anchors = '0,2'
+    dialog.H, dialog.W = '100%', '100%'
+
+    local scrollbox = dialog:Append('ScrollBox')
+    scrollbox.Name = 'mhbox'
+
+    local scrollbar = dialog:Append('ScrollBarV')
+    scrollbar.ScrollTarget = '../mhbox'
+    scrollbar.Anchors = '1,0'
+
+    local rowH = 40
+    -- Only two color refs used, both confirmed real in community examples -
+    -- avoids guessing at semantic green/red names that may not exist.
+    local COLOR_ON = 'Global.Text'
+    local COLOR_OFF = 'Global.Inactive'
+
+    for i, h in ipairs(heads) do
+      local y = (i - 1) * rowH
+      local rowColor = h.online and COLOR_ON or COLOR_OFF
+
+      local statusLbl = scrollbox:Append('Button')
+      statusLbl.Text = h.online and 'On' or 'Off'
+      statusLbl.HasHover = 'No'
+      statusLbl.TextColor = rowColor
+      statusLbl.W, statusLbl.H = 40, rowH - 4
+      statusLbl.X, statusLbl.Y = 5, y
+
+      local ipLbl = scrollbox:Append('Button')
+      ipLbl.Text = h.ip or '-'
+      ipLbl.HasHover = 'No'
+      ipLbl.TextColor = rowColor
+      ipLbl.TextalignmentH = 'Left'
+      ipLbl.W, ipLbl.H = 150, rowH - 4
+      ipLbl.X, ipLbl.Y = 50, y
+
+      local nameLbl = scrollbox:Append('Button')
+      nameLbl.Text = h.name or '-'
+      nameLbl.HasHover = 'No'
+      nameLbl.TextColor = rowColor
+      nameLbl.TextalignmentH = 'Left'
+      nameLbl.W, nameLbl.H = 180, rowH - 4
+      nameLbl.X, nameLbl.Y = 205, y
+
+      local fixInput = scrollbox:Append('LineEdit')
+      fixInput.Text = tostring(h.fixtureNo or '')
+      fixInput.W, fixInput.H = 60, rowH - 4
+      fixInput.X, fixInput.Y = 390, y
+      fixInputs[i] = fixInput
+
+      local uaddrText = '--'
+      if h.universe and h.addr then uaddrText = h.universe .. '.' .. string.format('%03d', h.addr) end
+      local uaddrLbl = scrollbox:Append('Button')
+      uaddrLbl.Text = uaddrText
+      uaddrLbl.HasHover = 'No'
+      uaddrLbl.TextColor = rowColor
+      uaddrLbl.W, uaddrLbl.H = 70, rowH - 4
+      uaddrLbl.X, uaddrLbl.Y = 455, y
+
+      local roleLbl = scrollbox:Append('Button')
+      roleLbl.Text = h.role or '-'
+      roleLbl.HasHover = 'No'
+      roleLbl.TextColor = rowColor
+      roleLbl.W, roleLbl.H = 80, rowH - 4
+      roleLbl.X, roleLbl.Y = 530, y
+
+      local idBtn = scrollbox:Append('Button')
+      idBtn.Text = 'Identify'
+      idBtn.HasHover = 'Yes'
+      idBtn.W, idBtn.H = 90, rowH - 4
+      idBtn.X, idBtn.Y = 615, y
+      idBtn.PluginComponent = myHandle
+      idBtn.Clicked = 'MH_Identify' .. i
+
+      local applyBtn = scrollbox:Append('Button')
+      applyBtn.Text = 'Apply'
+      applyBtn.HasHover = 'Yes'
+      applyBtn.W, applyBtn.H = 90, rowH - 4
+      applyBtn.X, applyBtn.Y = 710, y
+      applyBtn.PluginComponent = myHandle
+      applyBtn.Clicked = 'MH_Apply' .. i
+
+      local ip = h.ip
+      signalTable['MH_Identify' .. i] = function(caller)
+        doIdentify(ip)
+      end
+      signalTable['MH_Apply' .. i] = function(caller)
+        local newVal = fixInputs[i].Text
+        if tostring(newVal) ~= tostring(h.fixtureNo or '') then
+          doSetFixture(ip, tostring(newVal))
+        end
+        doApply(ip)
+      end
+    end
+
+    -- Global actions: Identify All / Blackout All / Rainbow Demo
+    local globalGrid = baseLayer:Append('UILayoutGrid')
+    globalGrid.Anchors = '0,3'
+    globalGrid.Columns = 3
+    globalGrid.Rows = 1
+
+    local idAllBtn = globalGrid:Append('Button')
+    idAllBtn.Anchors = '0,0'
+    idAllBtn.Text = 'Identify All'
+    idAllBtn.HasHover = 'Yes'
+    idAllBtn.PluginComponent = myHandle
+    idAllBtn.Clicked = 'MH_IdentifyAllClicked'
+
+    local boAllBtn = globalGrid:Append('Button')
+    boAllBtn.Anchors = '1,0'
+    boAllBtn.Text = 'Blackout All'
+    boAllBtn.HasHover = 'Yes'
+    boAllBtn.PluginComponent = myHandle
+    boAllBtn.Clicked = 'MH_BlackoutAllClicked'
+
+    local rbAllBtn = globalGrid:Append('Button')
+    rbAllBtn.Anchors = '2,0'
+    rbAllBtn.Text = 'Rainbow Demo'
+    rbAllBtn.HasHover = 'Yes'
+    rbAllBtn.PluginComponent = myHandle
+    rbAllBtn.Clicked = 'MH_RainbowAllClicked'
+
+    -- Footer: Network settings
+    local footerGrid = baseLayer:Append('UILayoutGrid')
+    footerGrid.Anchors = '0,4'
+    footerGrid.Columns = 1
+    footerGrid.Rows = 1
+
+    local netBtn = footerGrid:Append('Button')
+    netBtn.Anchors = '0,0'
+    netBtn.Text = 'Open Art-Net Network Settings'
+    netBtn.HasHover = 'Yes'
+    netBtn.PluginComponent = myHandle
+    netBtn.Clicked = 'MH_NetworkSettingsClicked'
+
+    -- Fixed-chrome click handlers
+    signalTable.MH_CloseClicked = function(caller)
+      GetFocusDisplay().ScreenOverlay:ClearUIChildren()
+      continue = true
+    end
+    signalTable.MH_DiscoverClicked = function(caller) doDiscover(nil) end
+    signalTable.MH_RefreshClicked = function(caller) doRefresh() end
+    signalTable.MH_SettingsClicked = function(caller) doSettings() end
+    signalTable.MH_IdentifyAllClicked = function(caller) doIdentifyAll() end
+    signalTable.MH_BlackoutAllClicked = function(caller) doBlackoutAll() end
+    signalTable.MH_RainbowAllClicked = function(caller) doRainbowAll(true) end
+    signalTable.MH_NetworkSettingsClicked = function(caller) Cmd('Menu "ConnectorConfig"') end
+
+  end)
+
+  if not ok then
+    notifyError("Window build failed: " .. tostring(err))
+    return
+  end
+
+  local guard = 0
+  repeat
+    guard = guard + 1
+  until continue or guard > 200000000
+end
+
+-- ============================================================================
 -- SECTION 12: Entry point
 -- Confirmed convention for this build: the script's outermost chunk must
 -- RETURN its entry function(s) - `function Main(...)` alone (without the
@@ -1069,6 +1331,7 @@ function Main(display_handle, arg)
   end
 
   if cmd == "menu" then return doMenu()
+  elseif cmd == "window" then doWindow()
   elseif cmd == "list" then renderHeadsTable()
   elseif cmd == "discover" then doDiscover(tokens[1])
   elseif cmd == "refresh" then doRefresh()

@@ -41,6 +41,7 @@ That opens the clickable UI — no typing needed from here on. Or `Plugin 4 "Hel
 
 | Command | Does |
 |---|---|
+| `Window` | Open the full window — table of all heads, per-row Apply/Identify, global actions (experimental, not yet live-verified) |
 | `Menu` | Open the clickable menu — buttons + an editable Fix# field, no typing needed |
 | `Discover [ip]` | Seed a head IP, pull `/api/heads`, scan nearby addresses for extras |
 | `List` | Show the head table as plain text (status, IP, name, linked fixture, patch) |
@@ -61,13 +62,16 @@ Run each as `Plugin <pool-number> "<command>"`, e.g. `Plugin 4 "Apply 192.168.1.
 
 ---
 
-## UI: clickable, not a persistent docked window
+## UI: two options, neither is a true docked window
 
-The spec calls for a native popup/dockable table view that stays open. What's here instead is a real point-and-click UI (`Menu`) built on grandMA3's `MessageBox` API — a main menu listing every head as a button, and a per-head dialog with an editable Fix# field plus Apply/Identify/Rename buttons — rather than typed commands. It's not a *persistent* docked window: each screen is a modal dialog you click through, not something left open on a screen permanently while patching.
+The spec calls for a native popup/dockable table view. Two UI layers are built here, both click-driven rather than typed commands:
 
-A true always-on docked table would mean authoring an MA3 **Layout View** or **UI Layout** — real, Lua-drivable features (community plugins like [Build-A-Layout](https://addondesk.com/product/build-a-layout/) generate Layout Views programmatically), but a separate, larger research task from what's built here. See [docs/verification-checklist.md](docs/verification-checklist.md).
+- **`Window`** (experimental) — the real thing per the spec's layout: a table of every head (status, IP, MAC, name, Fix#, U.Addr, role) with per-row Apply/Identify buttons, a header (Discover/Refresh/Settings), global actions (Identify All/Blackout All/Rainbow Demo), and a footer. Built on grandMA3's `Append('ClassName')` UI-object API — the same building blocks (`TitleBar`, `DialogFrame`, `ScrollBox`, `Button`, `LineEdit`, ...) grandMA3's own shipped dialogs are built from, confirmed by reading `message_box.uixml` directly. **Not yet seen rendered live** — see [docs/verification-checklist.md](docs/verification-checklist.md) for exactly what's confirmed vs. still open.
+- **`Menu`** — a simpler, dialog-based fallback on the well-established `MessageBox` API: a main menu listing every head as a button, and a per-head dialog with an editable Fix# field plus Apply/Identify/Rename buttons.
 
-For one-touch access without opening the menu at all, put individual commands on **Macros** assigned to executor buttons — see [docs/installation.md](docs/installation.md#macros--executor-buttons-optional).
+**Neither is a true persistent dock.** Confirmed by reading grandMA3's own `add_window.lua`: dockable window types (Command Line History, the pool windows, etc.) come from a fixed, engine-built list with no Lua hook to register a new one — a plugin can only build an *overlay* that stays open for as long as its Lua task keeps running, not a window integrated into the screen's own layout grid the way built-in windows are. `Window` gets as close to "feels permanent" as a plugin can.
+
+For one-touch access without opening either UI, put individual commands on **Macros** assigned to executor buttons — see [docs/installation.md](docs/installation.md#macros--executor-buttons-optional).
 
 ---
 
