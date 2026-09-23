@@ -482,6 +482,11 @@ function api.setFixID(ip, fixID)
   return ok and code == 200, err or ("HTTP " .. tostring(code))
 end
 
+function api.setName(ip, name)
+  local ok, code, _, err = httpRequest(ip, "POST", "/api/config/name", { name = name }, 2000)
+  return ok and code == 200, err or ("HTTP " .. tostring(code))
+end
+
 -- POST /api/artnet/patch (not /api/config/patch - see docs/api-reference.md).
 -- Requires the head's firmware to be built with PLUGIN_ARTNET, which is the
 -- companion firmware's default build per the plugin spec.
@@ -729,6 +734,14 @@ local function doSetFixture(ip, val)
   end
 end
 
+local function doSetName(ip, name)
+  local head, _, heads = findHeadByIp(ip)
+  if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
+  head.name = name
+  saveHeads(heads)
+  notifyInfo(ip .. " name field set to \"" .. name .. "\" (not yet pushed - run: Apply " .. ip .. ")")
+end
+
 local function doUseSelection(ip)
   local sel = ma3ReadSelectedFixtures()
   if not sel or #sel == 0 then
@@ -743,6 +756,16 @@ local function doApply(ip)
   if not head then
     notifyError("No known head at " .. tostring(ip) .. ". Run Discover or List first.")
     return
+  end
+
+  -- Name pushes independently of fixture/patch status - editable even on
+  -- a head with no linked fixture yet.
+  if head.name and head.name ~= "" then
+    local okName, nameErr = api.setName(head.ip, head.name)
+    if not okName then
+      notifyError("Failed to set name on " .. head.ip .. " [" .. tostring(nameErr) .. "].")
+      return
+    end
   end
 
   local universe, addr = nil, nil
@@ -790,6 +813,15 @@ local function doIdentify(ip)
   local ok, err = api.identify(head.ip, true)
   if ok then
     notifyInfo("Identify flashed on " .. head.ip .. ".")
+    -- Belt-and-suspenders auto-off via Timer() (confirmed in the HelpLua
+    -- export, but delay_time's unit - ms vs. seconds - isn't verified, so
+    -- this is pcall-guarded and non-fatal either way: the firmware itself
+    -- already auto-stops the identify flash after ~2s regardless
+    -- (Firmware/MiniHead/README.md S8.3), so the LED never stays on
+    -- forever even if this call does nothing.
+    pcall(function()
+      Timer(function() api.identify(head.ip, false) end, 3000, 1)
+    end)
   else
     notifyError("Identify failed on " .. head.ip .. " [" .. tostring(err) .. "].")
   end
@@ -1103,12 +1135,19 @@ end
 -- and just tears the window down.
 -- ============================================================================
 
-local function doWindow()
+-- doWindow and doSettingsDialog close one another (Settings closes the main
+-- window and opens itself; OK/Cancel/close on Settings reopens the main
+-- window), so both are forward-declared and call each other by upvalue.
+local doWindow
+local doSettingsDialog
+
+doWindow = function()
   local heads = loadHeads()
   table.sort(heads, function(a, b) return ipSortKey(a.ip) < ipSortKey(b.ip) end)
 
   local continue = false
   local fixInputs = {}
+  local nameInputs = {}
 
   local ok, err = pcall(function()
 
@@ -1116,12 +1155,11 @@ local function doWindow()
     baseLayer.H = 560
     baseLayer.W = 940
     baseLayer.Columns = 1
-    baseLayer.Rows = 5
+    baseLayer.Rows = 4
     baseLayer[1][1].SizePolicy = 'Fixed'; baseLayer[1][1].Size = 36  -- title bar
     baseLayer[1][2].SizePolicy = 'Fixed'; baseLayer[1][2].Size = 44  -- header actions
     baseLayer[1][3].SizePolicy = 'Stretch'                            -- head list
-    baseLayer[1][4].SizePolicy = 'Fixed'; baseLayer[1][4].Size = 44  -- global actions
-    baseLayer[1][5].SizePolicy = 'Fixed'; baseLayer[1][5].Size = 40  -- footer
+    baseLayer[1][4].SizePolicy = 'Fixed'; baseLayer[1][4].Size = 44  -- bottom actions
     baseLayer.AutoClose = 'No'
     baseLayer.CloseOnEscape = 'Yes'
 
@@ -1247,13 +1285,15 @@ local function doWindow()
       macLbl.W, macLbl.H = 130, rowH - 4
       macLbl.X, macLbl.Y = 185, y
 
-      local nameLbl = scrollbox:Append('Button')
-      nameLbl.Text = nz(h.name, '-')
-      nameLbl.HasHover = 'No'
-      nameLbl.TextColor = rowColor
-      nameLbl.TextalignmentH = 'Left'
-      nameLbl.W, nameLbl.H = 140, rowH - 4
-      nameLbl.X, nameLbl.Y = 320, y
+      -- Editable regardless of fixture/patch status - Apply pushes it
+      -- independently of the fixID+patch push.
+      local nameInput = scrollbox:Append('LineEdit')
+      nameInput.Text = h.name or ''
+      nameInput.Font = 'Regular16'
+      nameInput.TextalignmentH = 'Left'
+      nameInput.W, nameInput.H = 140, rowH - 4
+      nameInput.X, nameInput.Y = 320, y
+      nameInputs[i] = nameInput
 
       -- Fix#: empty LineEdit renders as a bare keyboard glyph on this build
       -- until it has content or focus - expected for an unset fixtureNo,
@@ -1303,57 +1343,63 @@ local function doWindow()
         doIdentify(ip)
       end
       signalTable['MH_Apply' .. i] = function(caller)
-        local newVal = fixInputs[i].Text
-        if tostring(newVal) ~= tostring(h.fixtureNo or '') then
-          doSetFixture(ip, tostring(newVal))
+        local newFix = fixInputs[i].Text
+        if tostring(newFix) ~= tostring(h.fixtureNo or '') then
+          doSetFixture(ip, tostring(newFix))
+        end
+        local newName = nameInputs[i].Text
+        if tostring(newName) ~= tostring(h.name or '') then
+          doSetName(ip, tostring(newName))
         end
         doApply(ip)
       end
     end
 
-    -- Global actions: Identify All / Blackout All / Rainbow Demo
-    local globalGrid = baseLayer:Append('UILayoutGrid')
-    globalGrid.Anchors = '0,3'
-    globalGrid.Columns = 4
-    globalGrid.Rows = 1
+    -- Bottom actions: global fleet actions + MA3 shortcuts, one row (was
+    -- two separate rows - merged to free vertical space for the table).
+    local bottomGrid = baseLayer:Append('UILayoutGrid')
+    bottomGrid.Anchors = '0,3'
+    bottomGrid.Columns = 6
+    bottomGrid.Rows = 1
 
-    local idAllBtn = globalGrid:Append('Button')
+    local idAllBtn = bottomGrid:Append('Button')
     idAllBtn.Anchors = '0,0'
     idAllBtn.Text = 'Identify All'
     idAllBtn.HasHover = 'Yes'
     idAllBtn.PluginComponent = myHandle
     idAllBtn.Clicked = 'MH_IdentifyAllClicked'
 
-    local boAllBtn = globalGrid:Append('Button')
+    local boAllBtn = bottomGrid:Append('Button')
     boAllBtn.Anchors = '1,0'
     boAllBtn.Text = 'Blackout All'
     boAllBtn.HasHover = 'Yes'
     boAllBtn.PluginComponent = myHandle
     boAllBtn.Clicked = 'MH_BlackoutAllClicked'
 
-    local rbAllBtn = globalGrid:Append('Button')
+    local rbAllBtn = bottomGrid:Append('Button')
     rbAllBtn.Anchors = '2,0'
     rbAllBtn.Text = 'Rainbow'
     rbAllBtn.HasHover = 'Yes'
     rbAllBtn.PluginComponent = myHandle
     rbAllBtn.Clicked = 'MH_RainbowAllClicked'
 
-    local demoAllBtn = globalGrid:Append('Button')
+    local demoAllBtn = bottomGrid:Append('Button')
     demoAllBtn.Anchors = '3,0'
     demoAllBtn.Text = 'Demo'
     demoAllBtn.HasHover = 'Yes'
     demoAllBtn.PluginComponent = myHandle
     demoAllBtn.Clicked = 'MH_DemoAllClicked'
 
-    -- Footer: Network settings
-    local footerGrid = baseLayer:Append('UILayoutGrid')
-    footerGrid.Anchors = '0,4'
-    footerGrid.Columns = 1
-    footerGrid.Rows = 1
+    local patchBtn = bottomGrid:Append('Button')
+    patchBtn.Anchors = '4,0'
+    patchBtn.Text = 'Open Patch'
+    patchBtn.HasHover = 'Yes'
+    patchBtn.PluginComponent = myHandle
+    patchBtn.Clicked = 'MH_OpenPatchClicked'
 
-    local netBtn = footerGrid:Append('Button')
-    netBtn.Anchors = '0,0'
-    netBtn.Text = 'Open Art-Net Network Settings'
+    local netBtn = bottomGrid:Append('Button')
+    netBtn.Anchors = '5,0'
+    netBtn.Text = 'Network Settings'
     netBtn.HasHover = 'Yes'
     netBtn.PluginComponent = myHandle
     netBtn.Clicked = 'MH_NetworkSettingsClicked'
@@ -1365,11 +1411,18 @@ local function doWindow()
     end
     signalTable.MH_DiscoverClicked = function(caller) doDiscover(nil) end
     signalTable.MH_RefreshClicked = function(caller) doRefresh() end
-    signalTable.MH_SettingsClicked = function(caller) doSettings() end
+    signalTable.MH_SettingsClicked = function(caller)
+      GetFocusDisplay().ScreenOverlay:ClearUIChildren()
+      continue = true
+      doSettingsDialog()
+    end
     signalTable.MH_IdentifyAllClicked = function(caller) doIdentifyAll() end
     signalTable.MH_BlackoutAllClicked = function(caller) doBlackoutAll() end
     signalTable.MH_RainbowAllClicked = function(caller) doRainbowAll(true) end
     signalTable.MH_DemoAllClicked = function(caller) doDemoAll(true) end
+    -- "Menu 'Patch'.'Edit'" confirmed from grandMA3's own shipped
+    -- menu_selector.uixml (the SignalValue behind its own "Patch" button).
+    signalTable.MH_OpenPatchClicked = function(caller) Cmd('Menu "Patch"."Edit"') end
     signalTable.MH_NetworkSettingsClicked = function(caller) Cmd('Menu "ConnectorConfig"') end
 
   end)
@@ -1383,6 +1436,47 @@ local function doWindow()
   repeat
     guard = guard + 1
   until continue or guard > 200000000
+end
+
+-- Settings editor: one MessageBox with both text inputs and boolean
+-- states, confirmed supported together by MA Lighting's own documented
+-- MessageBox example. Reopens the main window on OK, Cancel, or dismiss.
+doSettingsDialog = function()
+  local s = loadSettings()
+
+  local result = MessageBox({
+    title = "MiniHead Settings",
+    message = "Poll interval and scan radius apply next time you Discover/Refresh.",
+    inputs = {
+      { name = "Poll Interval (s)", value = tostring(s.pollInterval) },
+      { name = "Scan Radius", value = tostring(s.scanRadius) },
+    },
+    states = {
+      { name = "Toast on Error", state = s.toastEnabled and true or false },
+      { name = "Command-line Log", state = s.cmdlineLogEnabled and true or false },
+    },
+    commands = {
+      { value = 1, name = "OK" },
+      { value = 0, name = "Cancel" },
+    },
+  })
+
+  if result and result.success and result.result == 1 then
+    if result.inputs then
+      local pollN = tonumber(result.inputs["Poll Interval (s)"])
+      local radiusN = tonumber(result.inputs["Scan Radius"])
+      if pollN and pollN >= 5 then s.pollInterval = pollN end
+      if radiusN and radiusN > 0 then s.scanRadius = radiusN end
+    end
+    if result.states then
+      if result.states["Toast on Error"] ~= nil then s.toastEnabled = result.states["Toast on Error"] end
+      if result.states["Command-line Log"] ~= nil then s.cmdlineLogEnabled = result.states["Command-line Log"] end
+    end
+    saveSettings(s)
+    notifyInfo("Settings saved.")
+  end
+
+  return doWindow()
 end
 
 -- ============================================================================
