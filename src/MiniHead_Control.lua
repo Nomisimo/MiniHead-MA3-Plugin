@@ -1406,18 +1406,21 @@ doWindow = function()
       signalTable['MH_Edit' .. i] = function(caller)
         local head2 = findHeadByIp(ip)
         if not head2 then return end
+        local uaddrStr = ''
+        if head2.universe and head2.addr then
+          uaddrStr = head2.universe .. "." .. string.format("%03d", head2.addr)
+        end
         local result = MessageBox({
           title = "Edit - " .. nz(head2.name, ip),
           message = "Confirm or edit, then push to " .. ip .. ".\n" ..
-            "Leave Universe/Address blank to use MA3's own patch for this Fix#.",
+            "U.Addr format: 1.001 (universe.address). Leave blank to use MA3's own patch for this Fix#.",
           inputs = {
             { name = "Name", value = head2.name or '' },
             { name = "Fix#", value = tostring(head2.fixtureNo or '') },
-            { name = "Universe", value = head2.universe and tostring(head2.universe) or '' },
-            { name = "Address", value = head2.addr and tostring(head2.addr) or '' },
+            { name = "U.Addr", value = uaddrStr },
           },
           commands = {
-            { value = 1, name = "Edit" },
+            { value = 1, name = "Save" },
             { value = 0, name = "Cancel" },
           },
         })
@@ -1432,8 +1435,15 @@ doWindow = function()
           if newFix ~= nil and newFix ~= tostring(head2.fixtureNo or '') then
             doSetFixture(ip, newFix)
           end
-          overrideUni = tonumber(result.inputs["Universe"])
-          overrideAddr = tonumber(result.inputs["Address"])
+          local uaddrIn = result.inputs["U.Addr"]
+          if uaddrIn and uaddrIn ~= '' then
+            local u, a = tostring(uaddrIn):match("(%d+)%.(%d+)")
+            if u and a then
+              overrideUni, overrideAddr = tonumber(u), tonumber(a)
+            else
+              notifyError("U.Addr \"" .. tostring(uaddrIn) .. "\" isn't in 1.001 format - ignored, falling back to MA3's patch.")
+            end
+          end
         end
         doApply(ip, overrideUni, overrideAddr)
       end
@@ -1493,7 +1503,7 @@ doWindow = function()
     netBtn.Anchors = '5,0'
     netBtn.Text = 'Network Settings'
     netBtn.HasHover = 'Yes'
-    tryColor(netBtn, 'Texture', 'corner5')
+    tryColor(netBtn, 'Texture', 'corner3')
     netBtn.PluginComponent = myHandle
     netBtn.Clicked = 'MH_NetworkSettingsClicked'
 
