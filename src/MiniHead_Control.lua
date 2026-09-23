@@ -754,6 +754,26 @@ local function doSetName(ip, name)
   notifyInfo(ip .. " name field set to \"" .. name .. "\" (not yet pushed - run: Apply " .. ip .. ")")
 end
 
+-- Diagnostic: dumps every property MA3 actually has on a fixture handle to
+-- the Command Line History, to find the real patch property name (Get(h,
+-- "Patch")/"Universe"/"Address" are a guess that's been confirmed wrong -
+-- "Address finden geht nicht"). Run against a fixture that IS patched in
+-- MA3 and look for whatever property holds "1.001"-style or separate
+-- universe/address values.
+local function doDumpFixture(fixtureNo)
+  local n = tonumber(fixtureNo)
+  if not n then notifyError("Usage: DumpFixture <n> (an MA3 fixture number)"); return end
+  local ok, err = pcall(function()
+    local handle = FromAddr("Fixture " .. tostring(n))
+    if not handle then error("FromAddr('Fixture " .. n .. "') returned nil") end
+    Printf("[MiniHead] Dumping Fixture " .. n .. " - look below for Patch/Universe/Address:")
+    handle:Dump()
+  end)
+  if not ok then
+    notifyError("DumpFixture failed: " .. tostring(err))
+  end
+end
+
 local function doUseSelection(ip)
   local sel = ma3ReadSelectedFixtures()
   if not sel or #sel == 0 then
@@ -763,7 +783,10 @@ local function doUseSelection(ip)
   doSetFixture(ip, tostring(sel[1]))
 end
 
-local function doApply(ip)
+-- overrideUniverse/overrideAddr let a caller (the Edit dialog) supply a
+-- patch by hand when MA3's own ma3ReadPatch() can't find one - still never
+-- invented by the plugin itself, just typed in by the user that one time.
+local function doApply(ip, overrideUniverse, overrideAddr)
   local head, _, heads = findHeadByIp(ip)
   if not head then
     notifyError("No known head at " .. tostring(ip) .. ". Run Discover or List first.")
@@ -783,10 +806,9 @@ local function doApply(ip)
   end
 
   -- Only ever pushes an address that MA3 itself reports as patched under
-  -- this Fix# - never invented/computed. If MA3 has no patch there, the
-  -- only choice is fixID-only or cancel.
-  local universe, addr = nil, nil
-  if head.fixtureNo then
+  -- this Fix#, or one the user typed in by hand this time - never invented.
+  local universe, addr = overrideUniverse, overrideAddr
+  if (not universe or not addr) and head.fixtureNo then
     universe, addr = ma3ReadPatch(head.fixtureNo)
     if not universe then
       local proceed = confirmDialog("MiniHead - Fixture Not Patched",
@@ -827,19 +849,18 @@ local function doIdentify(ip)
   local ok, err = api.identify(head.ip, true)
   if ok then
     notifyInfo("Identify flashed on " .. head.ip .. ".")
-    -- Belt-and-suspenders auto-off via Timer() (confirmed in the HelpLua
-    -- export, but delay_time's unit - ms vs. seconds - isn't verified).
-    -- Explicit diagnostics here since the first live attempt didn't
-    -- visibly turn the LED off - this tells us whether Timer() itself
-    -- rejected the call vs. scheduled it but the callback never fired.
-    local timerOk, timerErr = pcall(function()
-      Timer(function()
-        local offOk, offErr = api.identify(head.ip, false)
-        Printf("[MiniHead] Identify auto-off fired for " .. head.ip .. ": " .. tostring(offOk) .. " " .. tostring(offErr))
-      end, 3000, 1)
-    end)
-    if not timerOk then
-      Printf("[MiniHead] Identify auto-off Timer() scheduling failed: " .. tostring(timerErr))
+    -- Timer()'s delay_time unit was never confirmed and the auto-off
+    -- wasn't visibly happening - switched to a real, exact wait using
+    -- os.clock() (confirmed available: full standard Lua os/io libraries,
+    -- not a custom/sandboxed subset - see verification-checklist.md).
+    -- Blocks this click handler for 1s, which is fine for a one-shot
+    -- action the user is already standing there waiting on - unlike the
+    -- Window's own open-ended wait loop, this is short and bounded.
+    local clockStart = os.clock()
+    while os.clock() - clockStart < 1.0 do end
+    local offOk, offErr = api.identify(head.ip, false)
+    if not offOk then
+      Printf("[MiniHead] Identify auto-off failed for " .. head.ip .. " [" .. tostring(offErr) .. "].")
     end
   else
     notifyError("Identify failed on " .. head.ip .. " [" .. tostring(err) .. "].")
@@ -1006,6 +1027,7 @@ local function doHelp()
     "  Refresh                     - re-check online status + re-pull head list",
     "  SetFixture <ip> <n>         - link a head to MA3 fixture number n (also its fixture ID - same number)",
     "  UseSelection <ip>           - fill SetFixture from the current MA3 selection",
+    "  DumpFixture <n>              - diagnostic: dump all of MA3 fixture n's properties",
     "  Apply <ip>                  - push fixture number + patch to that head",
     "  Identify <ip>               - flash one head",
     "  IdentifyAll                 - flash all heads",
@@ -1302,7 +1324,7 @@ doWindow = function()
       statusLbl.Text = h.online and 'On' or 'Off'
       statusLbl.HasHover = 'No'
       statusLbl.TextColor = rowColor
-      tryColor(statusLbl, 'TextColor', h.online and 'Global.Green' or 'Global.Inactive')
+      tryColor(statusLbl, 'TextColor', h.online and 'Global.Green' or 'Global.Red')
       statusLbl.W, statusLbl.H = 35, rowH - 4
       statusLbl.X, statusLbl.Y = 5, y
 
@@ -1368,35 +1390,39 @@ doWindow = function()
       idBtn.PluginComponent = myHandle
       idBtn.Clicked = 'MH_Identify' .. i
 
-      local applyBtn = scrollbox:Append('Button')
-      applyBtn.Text = 'Apply'
-      applyBtn.HasHover = 'Yes'
-      applyBtn.W, applyBtn.H = 85, rowH - 4
-      applyBtn.X, applyBtn.Y = 765, y
-      tryColor(applyBtn, 'TextColor', 'Global.Green')
-      applyBtn.PluginComponent = myHandle
-      applyBtn.Clicked = 'MH_Apply' .. i
+      local editBtn = scrollbox:Append('Button')
+      editBtn.Text = 'Edit'
+      editBtn.HasHover = 'Yes'
+      editBtn.W, editBtn.H = 85, rowH - 4
+      editBtn.X, editBtn.Y = 765, y
+      tryColor(editBtn, 'TextColor', 'Global.Green')
+      editBtn.PluginComponent = myHandle
+      editBtn.Clicked = 'MH_Edit' .. i
 
       local ip = h.ip
       signalTable['MH_Identify' .. i] = function(caller)
         doIdentify(ip)
       end
-      signalTable['MH_Apply' .. i] = function(caller)
+      signalTable['MH_Edit' .. i] = function(caller)
         local head2 = findHeadByIp(ip)
         if not head2 then return end
         local result = MessageBox({
-          title = "Apply - " .. nz(head2.name, ip),
-          message = "Confirm or edit before pushing to " .. ip .. ".",
+          title = "Edit - " .. nz(head2.name, ip),
+          message = "Confirm or edit, then push to " .. ip .. ".\n" ..
+            "Leave Universe/Address blank to use MA3's own patch for this Fix#.",
           inputs = {
             { name = "Name", value = head2.name or '' },
             { name = "Fix#", value = tostring(head2.fixtureNo or '') },
+            { name = "Universe", value = head2.universe and tostring(head2.universe) or '' },
+            { name = "Address", value = head2.addr and tostring(head2.addr) or '' },
           },
           commands = {
-            { value = 1, name = "Apply" },
+            { value = 1, name = "Edit" },
             { value = 0, name = "Cancel" },
           },
         })
         if not (result and result.success and result.result == 1) then return end
+        local overrideUni, overrideAddr = nil, nil
         if result.inputs then
           local newName = result.inputs["Name"]
           if newName ~= nil and newName ~= tostring(head2.name or '') then
@@ -1406,8 +1432,10 @@ doWindow = function()
           if newFix ~= nil and newFix ~= tostring(head2.fixtureNo or '') then
             doSetFixture(ip, newFix)
           end
+          overrideUni = tonumber(result.inputs["Universe"])
+          overrideAddr = tonumber(result.inputs["Address"])
         end
-        doApply(ip)
+        doApply(ip, overrideUni, overrideAddr)
       end
     end
 
@@ -1422,6 +1450,11 @@ doWindow = function()
     idAllBtn.Anchors = '0,0'
     idAllBtn.Text = 'Identify All'
     idAllBtn.HasHover = 'Yes'
+    -- Best-effort: round this button's bottom-left corner to match the
+    -- window's own - only confirmed corner textures so far are corner1/
+    -- corner2 on the TitleBar's top corners, so this is a guess at the
+    -- bottom-corner equivalents, individually pcall-guarded via tryColor.
+    tryColor(idAllBtn, 'Texture', 'corner4')
     idAllBtn.PluginComponent = myHandle
     idAllBtn.Clicked = 'MH_IdentifyAllClicked'
 
@@ -1460,6 +1493,7 @@ doWindow = function()
     netBtn.Anchors = '5,0'
     netBtn.Text = 'Network Settings'
     netBtn.HasHover = 'Yes'
+    tryColor(netBtn, 'Texture', 'corner5')
     netBtn.PluginComponent = myHandle
     netBtn.Clicked = 'MH_NetworkSettingsClicked'
 
@@ -1567,6 +1601,7 @@ function Main(display_handle, arg)
   elseif cmd == "refresh" then doRefresh()
   elseif cmd == "setfixture" then doSetFixture(tokens[1], tokens[2])
   elseif cmd == "useselection" then doUseSelection(tokens[1])
+  elseif cmd == "dumpfixture" then doDumpFixture(tokens[1])
   elseif cmd == "apply" then doApply(tokens[1])
   elseif cmd == "identify" then doIdentify(tokens[1])
   elseif cmd == "identifyall" then doIdentifyAll()
