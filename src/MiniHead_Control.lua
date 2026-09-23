@@ -1147,18 +1147,17 @@ local function doWindow()
     titleClose.PluginComponent = myHandle
     titleClose.Clicked = 'MH_CloseClicked'
 
-    -- Header actions: Discover / Refresh / Settings - fixed-width buttons
-    -- left-aligned, trailing column stretches to absorb the rest (rather
-    -- than 3 equal-stretch columns spreading the buttons across the full
-    -- window width).
+    -- Header actions: Discover / Refresh / Settings.
+    -- NOTE: explicit per-cell [col][row].SizePolicy (like BaseInput uses)
+    -- crashed here on a UILayoutGrid ("attempt to index a nil value") -
+    -- that indexing pattern is BaseInput-specific, not general. Reverted to
+    -- the plain Columns/Rows + per-child Anchors pattern confirmed working
+    -- by the community examples' own button grids - equal-width columns,
+    -- less tight than intended but reliable.
     local headerGrid = baseLayer:Append('UILayoutGrid')
     headerGrid.Anchors = '0,1'
-    headerGrid.Columns = 4
+    headerGrid.Columns = 3
     headerGrid.Rows = 1
-    headerGrid[1][1].SizePolicy = 'Fixed'; headerGrid[1][1].Size = 160
-    headerGrid[2][1].SizePolicy = 'Fixed'; headerGrid[2][1].Size = 110
-    headerGrid[3][1].SizePolicy = 'Fixed'; headerGrid[3][1].Size = 110
-    headerGrid[4][1].SizePolicy = 'Stretch'
 
     local discoverBtn = headerGrid:Append('Button')
     discoverBtn.Anchors = '0,0'
