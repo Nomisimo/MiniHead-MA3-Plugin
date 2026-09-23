@@ -814,14 +814,19 @@ local function doIdentify(ip)
   if ok then
     notifyInfo("Identify flashed on " .. head.ip .. ".")
     -- Belt-and-suspenders auto-off via Timer() (confirmed in the HelpLua
-    -- export, but delay_time's unit - ms vs. seconds - isn't verified, so
-    -- this is pcall-guarded and non-fatal either way: the firmware itself
-    -- already auto-stops the identify flash after ~2s regardless
-    -- (Firmware/MiniHead/README.md S8.3), so the LED never stays on
-    -- forever even if this call does nothing.
-    pcall(function()
-      Timer(function() api.identify(head.ip, false) end, 3000, 1)
+    -- export, but delay_time's unit - ms vs. seconds - isn't verified).
+    -- Explicit diagnostics here since the first live attempt didn't
+    -- visibly turn the LED off - this tells us whether Timer() itself
+    -- rejected the call vs. scheduled it but the callback never fired.
+    local timerOk, timerErr = pcall(function()
+      Timer(function()
+        local offOk, offErr = api.identify(head.ip, false)
+        Printf("[MiniHead] Identify auto-off fired for " .. head.ip .. ": " .. tostring(offOk) .. " " .. tostring(offErr))
+      end, 3000, 1)
     end)
+    if not timerOk then
+      Printf("[MiniHead] Identify auto-off Timer() scheduling failed: " .. tostring(timerErr))
+    end
   else
     notifyError("Identify failed on " .. head.ip .. " [" .. tostring(err) .. "].")
   end
@@ -1146,22 +1151,39 @@ doWindow = function()
   table.sort(heads, function(a, b) return ipSortKey(a.ip) < ipSortKey(b.ip) end)
 
   local continue = false
-  local fixInputs = {}
-  local nameInputs = {}
 
   local ok, err = pcall(function()
 
+    -- Small helper: some color references may not exist on every build:
+    -- try each individually so a wrong guess just skips that one color
+    -- rather than failing the whole window build (like the UILayoutGrid
+    -- indexing bug did).
+    local function tryColor(obj, prop, colorName)
+      pcall(function() obj[prop] = colorName end)
+    end
+
     local baseLayer = GetFocusDisplay().ScreenOverlay:Append('BaseInput')
-    baseLayer.H = 560
+    baseLayer.H = 570
     baseLayer.W = 940
     baseLayer.Columns = 1
-    baseLayer.Rows = 4
+    baseLayer.Rows = 5
     baseLayer[1][1].SizePolicy = 'Fixed'; baseLayer[1][1].Size = 36  -- title bar
     baseLayer[1][2].SizePolicy = 'Fixed'; baseLayer[1][2].Size = 44  -- header actions
     baseLayer[1][3].SizePolicy = 'Stretch'                            -- head list
     baseLayer[1][4].SizePolicy = 'Fixed'; baseLayer[1][4].Size = 44  -- bottom actions
+    baseLayer[1][5].SizePolicy = 'Fixed'; baseLayer[1][5].Size = 12  -- bottom margin - see below
     baseLayer.AutoClose = 'No'
     baseLayer.CloseOnEscape = 'Yes'
+    -- DefaultMargin/DefaultMarginOnBorders confirmed in grandMA3's own
+    -- shipped message_box.uixml (<DialogFrame DefaultMargin="5" .../>) -
+    -- insets content from the window's own border instead of it touching
+    -- the edge, which is what the bottom action row was doing.
+    pcall(function() baseLayer.DefaultMargin = 8 end)
+    pcall(function() baseLayer.DefaultMarginOnBorders = 'Yes' end)
+    -- "Window.Plugins" confirmed from MA Lighting's own documented
+    -- MessageBox() example (backColor = "Window.Plugins") - a safe,
+    -- thematically-fitting accent instead of the plain default.
+    tryColor(baseLayer, 'BackColor', 'Window.Plugins')
 
     -- Title bar
     local titleBar = baseLayer:Append('TitleBar')
@@ -1285,26 +1307,25 @@ doWindow = function()
       macLbl.W, macLbl.H = 130, rowH - 4
       macLbl.X, macLbl.Y = 185, y
 
-      -- Editable regardless of fixture/patch status - Apply pushes it
-      -- independently of the fixID+patch push.
-      local nameInput = scrollbox:Append('LineEdit')
-      nameInput.Text = h.name or ''
-      nameInput.Font = 'Regular16'
-      nameInput.TextalignmentH = 'Left'
-      nameInput.W, nameInput.H = 140, rowH - 4
-      nameInput.X, nameInput.Y = 320, y
-      nameInputs[i] = nameInput
+      -- Display-only in the row (a raw Append'd LineEdit's .Text did not
+      -- reliably read back what was actually typed, live-tested - see
+      -- verification-checklist.md). Editing happens via a MessageBox
+      -- prompt on Apply instead, using the proven inputs= mechanism.
+      local nameLbl = scrollbox:Append('Button')
+      nameLbl.Text = nz(h.name, '-')
+      nameLbl.HasHover = 'No'
+      nameLbl.TextColor = rowColor
+      nameLbl.TextalignmentH = 'Left'
+      nameLbl.W, nameLbl.H = 140, rowH - 4
+      nameLbl.X, nameLbl.Y = 320, y
 
-      -- Fix#: empty LineEdit renders as a bare keyboard glyph on this build
-      -- until it has content or focus - expected for an unset fixtureNo,
-      -- not a bug. Font set explicitly so an entered number stays legible.
-      local fixInput = scrollbox:Append('LineEdit')
-      fixInput.Text = tostring(h.fixtureNo or '')
-      fixInput.Font = 'Regular16'
-      fixInput.TextalignmentH = 'Centre'
-      fixInput.W, fixInput.H = 55, rowH - 4
-      fixInput.X, fixInput.Y = 465, y
-      fixInputs[i] = fixInput
+      local fixLbl = scrollbox:Append('Button')
+      fixLbl.Text = tostring(h.fixtureNo or '-')
+      fixLbl.HasHover = 'No'
+      fixLbl.TextColor = rowColor
+      fixLbl.TextalignmentH = 'Centre'
+      fixLbl.W, fixLbl.H = 55, rowH - 4
+      fixLbl.X, fixLbl.Y = 465, y
 
       local uaddrText = '--'
       if h.universe and h.addr then uaddrText = h.universe .. '.' .. string.format('%03d', h.addr) end
@@ -1327,6 +1348,7 @@ doWindow = function()
       idBtn.HasHover = 'Yes'
       idBtn.W, idBtn.H = 85, rowH - 4
       idBtn.X, idBtn.Y = 675, y
+      tryColor(idBtn, 'BackColor', 'Global.Blue')
       idBtn.PluginComponent = myHandle
       idBtn.Clicked = 'MH_Identify' .. i
 
@@ -1335,6 +1357,7 @@ doWindow = function()
       applyBtn.HasHover = 'Yes'
       applyBtn.W, applyBtn.H = 85, rowH - 4
       applyBtn.X, applyBtn.Y = 765, y
+      tryColor(applyBtn, 'BackColor', 'Global.Green')
       applyBtn.PluginComponent = myHandle
       applyBtn.Clicked = 'MH_Apply' .. i
 
@@ -1343,13 +1366,30 @@ doWindow = function()
         doIdentify(ip)
       end
       signalTable['MH_Apply' .. i] = function(caller)
-        local newFix = fixInputs[i].Text
-        if tostring(newFix) ~= tostring(h.fixtureNo or '') then
-          doSetFixture(ip, tostring(newFix))
-        end
-        local newName = nameInputs[i].Text
-        if tostring(newName) ~= tostring(h.name or '') then
-          doSetName(ip, tostring(newName))
+        local head2 = findHeadByIp(ip)
+        if not head2 then return end
+        local result = MessageBox({
+          title = "Apply - " .. nz(head2.name, ip),
+          message = "Confirm or edit before pushing to " .. ip .. ".",
+          inputs = {
+            { name = "Name", value = head2.name or '' },
+            { name = "Fix#", value = tostring(head2.fixtureNo or '') },
+          },
+          commands = {
+            { value = 1, name = "Apply" },
+            { value = 0, name = "Cancel" },
+          },
+        })
+        if not (result and result.success and result.result == 1) then return end
+        if result.inputs then
+          local newName = result.inputs["Name"]
+          if newName ~= nil and newName ~= tostring(head2.name or '') then
+            doSetName(ip, newName)
+          end
+          local newFix = result.inputs["Fix#"]
+          if newFix ~= nil and newFix ~= tostring(head2.fixtureNo or '') then
+            doSetFixture(ip, newFix)
+          end
         end
         doApply(ip)
       end
@@ -1373,6 +1413,7 @@ doWindow = function()
     boAllBtn.Anchors = '1,0'
     boAllBtn.Text = 'Blackout All'
     boAllBtn.HasHover = 'Yes'
+    tryColor(boAllBtn, 'BackColor', 'Global.Red')
     boAllBtn.PluginComponent = myHandle
     boAllBtn.Clicked = 'MH_BlackoutAllClicked'
 
@@ -1380,6 +1421,7 @@ doWindow = function()
     rbAllBtn.Anchors = '2,0'
     rbAllBtn.Text = 'Rainbow'
     rbAllBtn.HasHover = 'Yes'
+    tryColor(rbAllBtn, 'BackColor', 'Global.Magenta')
     rbAllBtn.PluginComponent = myHandle
     rbAllBtn.Clicked = 'MH_RainbowAllClicked'
 
@@ -1387,6 +1429,7 @@ doWindow = function()
     demoAllBtn.Anchors = '3,0'
     demoAllBtn.Text = 'Demo'
     demoAllBtn.HasHover = 'Yes'
+    tryColor(demoAllBtn, 'BackColor', 'Global.Yellow')
     demoAllBtn.PluginComponent = myHandle
     demoAllBtn.Clicked = 'MH_DemoAllClicked'
 
