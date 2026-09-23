@@ -440,55 +440,62 @@ end
 
 local api = {}
 
+-- Every api.* function returns a trailing diagnostic string on failure -
+-- either "HTTP <code>" (reached the head, it rejected the request) or the
+-- raw transport error from socketSend (didn't reach it at all - this is
+-- the string that tells you whether item #1 in verification-checklist.md
+-- is the problem). notifyError callers append this when present.
+
 function api.getStatus(ip)
-  local ok, code, body = httpRequest(ip, "GET", "/api/status", nil, 800)
+  local ok, code, body, err = httpRequest(ip, "GET", "/api/status", nil, 800)
   if ok and code == 200 then
     return true, json.decode(body)
   end
-  return false, nil
+  return false, nil, err or ("HTTP " .. tostring(code))
 end
 
 function api.getHeads(ip)
-  local ok, code, body = httpRequest(ip, "GET", "/api/heads", nil, 2500)
+  local ok, code, body, err = httpRequest(ip, "GET", "/api/heads", nil, 2500)
   if ok and code == 200 then
     local data = json.decode(body)
     if type(data) == "table" then return true, data end
+    return false, nil, "bad JSON in response"
   end
-  return false, nil
+  return false, nil, err or ("HTTP " .. tostring(code))
 end
 
 -- Always called against the head's OWN ip - config routes have no leader
 -- redirect (Firmware/MiniHead/README.md S8.5).
 function api.setFixID(ip, fixID)
-  local ok, code = httpRequest(ip, "POST", "/api/config/fixid", { fixID = fixID }, 2000)
-  return ok and code == 200
+  local ok, code, _, err = httpRequest(ip, "POST", "/api/config/fixid", { fixID = fixID }, 2000)
+  return ok and code == 200, err or ("HTTP " .. tostring(code))
 end
 
 -- POST /api/artnet/patch (not /api/config/patch - see docs/api-reference.md).
 -- Requires the head's firmware to be built with PLUGIN_ARTNET, which is the
 -- companion firmware's default build per the plugin spec.
 function api.setPatch(ip, universe, startAddr)
-  local ok, code = httpRequest(ip, "POST", "/api/artnet/patch", { universe = universe, startAddr = startAddr }, 2000)
-  return ok and code == 200, code
+  local ok, code, _, err = httpRequest(ip, "POST", "/api/artnet/patch", { universe = universe, startAddr = startAddr }, 2000)
+  return ok and code == 200, code, err
 end
 
 -- "SELF" is a literal accepted by the firmware so we never need to know a
 -- head's own MAC to identify it - call this directly against its own IP.
 function api.identify(ip, on)
-  local ok, code = httpRequest(ip, "POST", "/api/heads/SELF/identify", { on = on }, 1500)
-  return ok and code == 200
+  local ok, code, _, err = httpRequest(ip, "POST", "/api/heads/SELF/identify", { on = on }, 1500)
+  return ok and code == 200, err or ("HTTP " .. tostring(code))
 end
 
 -- Global action: broadcasts to all heads via UDP regardless of which head's
 -- IP receives the HTTP call.
 function api.blackoutAll(ip)
-  local ok, code = httpRequest(ip, "POST", "/api/blackout", nil, 1500)
-  return ok and code == 200
+  local ok, code, _, err = httpRequest(ip, "POST", "/api/blackout", nil, 1500)
+  return ok and code == 200, err or ("HTTP " .. tostring(code))
 end
 
 function api.rainbowAll(ip, on)
-  local ok, code = httpRequest(ip, "POST", "/api/rainbow", { on = on }, 1500)
-  return ok and code == 200
+  local ok, code, _, err = httpRequest(ip, "POST", "/api/rainbow", { on = on }, 1500)
+  return ok and code == 200, err or ("HTTP " .. tostring(code))
 end
 
 -- ============================================================================
@@ -593,9 +600,11 @@ local function doDiscover(seedIp)
   end
 
   notifyInfo("Probing " .. seedIp .. " ...")
-  local okStatus = api.getStatus(seedIp)
+  local okStatus, _, statusErr = api.getStatus(seedIp)
   if not okStatus then
-    notifyError("No response from " .. seedIp .. " on port 80. Check the IP and that the head is powered and on this network.")
+    notifyError("No response from " .. seedIp .. " on port 80 [" .. tostring(statusErr) .. "]. " ..
+      "If the head is reachable by browser but this still fails, the error in [] is from the plugin's " ..
+      "network call (docs/verification-checklist.md item #1) - otherwise check the IP and that the head is powered and on this network.")
     return
   end
 
@@ -651,7 +660,7 @@ local function doRefresh()
   end
   local sourceIp = leaderIp or heads[1].ip
 
-  local okHeads, list = api.getHeads(sourceIp)
+  local okHeads, list, headsErr = api.getHeads(sourceIp)
   if okHeads and list then
     local prevByIp = {}
     for _, h in ipairs(heads) do prevByIp[h.ip] = h end
@@ -665,7 +674,7 @@ local function doRefresh()
     end
     heads = fresh
   else
-    notifyError("Could not refresh the head list from " .. sourceIp .. " - keeping the last known list.")
+    notifyError("Could not refresh the head list from " .. sourceIp .. " [" .. tostring(headsErr) .. "] - keeping the last known list.")
   end
 
   for _, h in ipairs(heads) do
@@ -733,17 +742,17 @@ local function doApply(ip)
     end
   end
 
-  local okId = api.setFixID(head.ip, head.fixID or 0)
+  local okId, idErr = api.setFixID(head.ip, head.fixID or 0)
   if not okId then
-    notifyError("Failed to set fixture ID on " .. head.ip .. " (offline or timed out).")
+    notifyError("Failed to set fixture ID on " .. head.ip .. " [" .. tostring(idErr) .. "].")
     return
   end
 
   if universe and addr then
-    local okPatch, code = api.setPatch(head.ip, universe, addr)
+    local okPatch, code, patchErr = api.setPatch(head.ip, universe, addr)
     if not okPatch then
       notifyError("Fixture ID set, but patch push failed on " .. head.ip ..
-        " (HTTP " .. tostring(code) .. "). Confirm the head's firmware has Art-Net (PLUGIN_ARTNET) enabled.")
+        " [" .. tostring(patchErr or code) .. "]. If this is HTTP 404, confirm the head's firmware has Art-Net (PLUGIN_ARTNET) enabled.")
       head.universe, head.addr = nil, nil
       saveHeads(heads)
       return
@@ -761,10 +770,11 @@ end
 local function doIdentify(ip)
   local head = findHeadByIp(ip)
   if not head then notifyError("No known head at " .. tostring(ip) .. "."); return end
-  if api.identify(head.ip, true) then
+  local ok, err = api.identify(head.ip, true)
+  if ok then
     notifyInfo("Identify flashed on " .. head.ip .. ".")
   else
-    notifyError("Identify failed on " .. head.ip .. " (offline or timed out).")
+    notifyError("Identify failed on " .. head.ip .. " [" .. tostring(err) .. "].")
   end
 end
 
@@ -790,20 +800,22 @@ end
 local function doBlackoutAll()
   local ip = anyReachableIp()
   if not ip then notifyInfo("No heads known yet."); return end
-  if api.blackoutAll(ip) then
+  local ok, err = api.blackoutAll(ip)
+  if ok then
     notifyInfo("Blackout sent (all heads).")
   else
-    notifyError("Blackout failed - " .. ip .. " unreachable. Try Refresh.")
+    notifyError("Blackout failed via " .. ip .. " [" .. tostring(err) .. "]. Try Refresh.")
   end
 end
 
 local function doRainbowAll(on)
   local ip = anyReachableIp()
   if not ip then notifyInfo("No heads known yet."); return end
-  if api.rainbowAll(ip, on) then
+  local ok, err = api.rainbowAll(ip, on)
+  if ok then
     notifyInfo("Rainbow demo " .. (on and "started" or "stopped") .. " (all heads).")
   else
-    notifyError("Rainbow command failed - " .. ip .. " unreachable. Try Refresh.")
+    notifyError("Rainbow command failed via " .. ip .. " [" .. tostring(err) .. "]. Try Refresh.")
   end
 end
 
