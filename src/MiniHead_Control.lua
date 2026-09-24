@@ -606,11 +606,23 @@ end
 -- signature also takes a display parameter, but using it to also relocate
 -- dialogs opened from the window (Edit, Settings, the picker below) is
 -- untested and deliberately left alone for now.
+-- A non-existent index isn't confirmed to make GetDisplayByIndex return nil
+-- cleanly - live testing turned up a "Window build failed: ...attempt to
+-- index a nil value (field 'ScreenOverlay')" crash after Settings display
+-- was set to a number beyond how many screens actually exist, which reads
+-- as GetDisplayByIndex handing back something truthy-but-unusable rather
+-- than nil for an out-of-range index. So both helpers below verify the
+-- handle actually exposes .ScreenOverlay, not just that it's non-nil.
+local function isUsableDisplay(h)
+  local ok, hasOverlay = pcall(function() return h.ScreenOverlay ~= nil end)
+  return ok and hasOverlay
+end
+
 local function resolveTargetDisplay()
   local s = loadSettings()
   if s.displayIndex and s.displayIndex > 0 then
     local ok, h = pcall(GetDisplayByIndex, s.displayIndex)
-    if ok and h then return h end
+    if ok and h and isUsableDisplay(h) then return h end
   end
   return GetFocusDisplay()
 end
@@ -621,7 +633,7 @@ local function probeDisplays()
   local found = {}
   for i = 1, 8 do
     local ok, h = pcall(GetDisplayByIndex, i)
-    if ok and h then found[#found + 1] = i end
+    if ok and h and isUsableDisplay(h) then found[#found + 1] = i end
   end
   return found
 end
@@ -1134,11 +1146,14 @@ local function doSettingsSet(key, val)
       s.displayIndex = 0
     else
       local n = tonumber(val)
-      if n and n > 0 and n == math.floor(n) then
-        s.displayIndex = n
-      else
+      if not (n and n > 0 and n == math.floor(n)) then
         notifyError("display must be a positive whole number (display index, see the Window title bar's Display button) or \"auto\"."); return
       end
+      local ok, h = pcall(GetDisplayByIndex, n)
+      if not (ok and h and isUsableDisplay(h)) then
+        notifyError("Display " .. n .. " doesn't exist on this system - check how many screens/monitors are actually connected, or use \"auto\"."); return
+      end
+      s.displayIndex = n
     end
   else
     notifyError("Unknown setting: " .. tostring(key))
