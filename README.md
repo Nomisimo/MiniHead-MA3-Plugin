@@ -55,7 +55,7 @@ That opens the clickable UI — no typing needed from here on. Or `Plugin 4 "Hel
 | `Batch [range]` | Batch-link + apply a selected (or typed) fixture range, matched to heads sorted by IP |
 | `Rename <ip>` | Write the head's name onto its linked MA3 fixture (confirms every time) |
 | `NetworkSettings` | Open MA3's My Network Interfaces settings (per-adapter DHCP/IP/Mask/Gateway) |
-| `Settings [key value]` | View/change poll interval, toasts, command-line logging, scan radius |
+| `Settings [key value]` | View/change poll interval, toasts, command-line logging, scan radius, network interface (`bindip`) |
 | `Help` | Print this list in-console |
 
 Run each as `Plugin <pool-number> "<command>"`, e.g. `Plugin 4 "Apply 192.168.1.50"`. Output goes to the **Command Line History** window. See [docs/installation.md](docs/installation.md) for details and executor-button wiring.

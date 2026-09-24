@@ -31,6 +31,15 @@
 local pluginName, componentName, signalTable, myHandle =
   select(1, ...), select(2, ...), select(3, ...), select(4, ...)
 
+-- Which local network interface outbound HTTP traffic (and the title bar's
+-- IP readout) should use, e.g. when MA3's own default route picks the
+-- wrong one of several adapters (MA-Net vs. the head router). Set once per
+-- invocation from Settings.bindIP at the top of Main(), then read as an
+-- upvalue by getLocalIP()/socketSend() in Section 6 - same pattern as
+-- myHandle above, rather than threading a new parameter through every
+-- api.*/httpRequest/socketSend call site.
+local currentBindIP = nil
+
 -- ============================================================================
 -- SECTION 1: Small utilities
 -- ============================================================================
@@ -61,6 +70,14 @@ local function ipSortKey(ip)
   local a, b, c, d = ipParts(ip)
   if not a then return 0 end
   return a * 16777216 + b * 65536 + c * 256 + d
+end
+
+-- "192.168.178.50" -> "192.168.178." - used to default the Discover prompt
+-- to MA3's own subnet instead of a hardcoded guess.
+local function subnetPrefix(ip)
+  local a, b, c = ipParts(ip)
+  if not a then return nil end
+  return a .. "." .. b .. "." .. c .. "."
 end
 
 -- Accepts "1 Thru 8", "1 thru 8", "1-8", "1,3,5", "1 2 3"
@@ -273,6 +290,7 @@ local function defaultSettings()
     toastEnabled = true,
     cmdlineLogEnabled = true,
     scanRadius = 8,       -- +/- host addresses probed around the seed IP on Discover
+    bindIP = "",          -- local network interface IP to use for head traffic; "" = auto-detect
   }
 end
 
@@ -375,7 +393,10 @@ end
 -- "connect" just asks the OS to pick a local address via the routing
 -- table) then read that address back with getsockname(). Returns nil if
 -- there's no route at all (no network connection).
+-- currentBindIP (Settings.bindIP) overrides this outright when set - the
+-- user has already told us which interface to use, no need to ask the OS.
 local function getLocalIP()
+  if currentBindIP and currentBindIP ~= "" then return currentBindIP end
   local ok, ip = pcall(function()
     local socket = require("socket")
     local s = socket.udp()
@@ -422,6 +443,13 @@ local function socketSend(ip, port, requestStr, timeoutMs)
     local sock = socket.tcp()
     if not sock then error("socket.tcp() returned nil") end
     sock:settimeout((timeoutMs or 3000) / 1000)
+    -- Pin the local address before connecting when Settings.bindIP is set,
+    -- so traffic actually leaves via the chosen interface rather than
+    -- whichever one the OS's default route would otherwise pick.
+    if currentBindIP and currentBindIP ~= "" then
+      local bound, bindErr = sock:bind(currentBindIP, 0)
+      if not bound then error("bind to " .. currentBindIP .. " failed: " .. tostring(bindErr)) end
+    end
     local connected, connErr = sock:connect(ip, port)
     if not connected then error(connErr or "connect failed") end
     sock:send(requestStr)
@@ -651,7 +679,8 @@ local function doDiscover(seedIp)
     seedIp = existingSettings.seedIP
   end
   if not seedIp or seedIp == "" then
-    seedIp = promptText("MiniHead - Enter a head's IP address", "192.168.1.")
+    local defaultPrefix = subnetPrefix(getLocalIP()) or "192.168.1."
+    seedIp = promptText("MiniHead - Enter a head's IP address", defaultPrefix)
   end
   if not seedIp or seedIp == "" then
     notifyInfo("Discover cancelled - no IP given.")
@@ -1014,7 +1043,8 @@ local function doSettings()
   Printf("  Toast on error: " .. tostring(s.toastEnabled))
   Printf("  Command-line log: " .. tostring(s.cmdlineLogEnabled))
   Printf("  Subnet scan radius: +/-" .. s.scanRadius)
-  Printf("  Change with: Settings poll <sec> | Settings toast <on|off> | Settings log <on|off> | Settings radius <n>")
+  Printf("  Network interface: " .. (s.bindIP ~= "" and s.bindIP or "auto-detect"))
+  Printf("  Change with: Settings poll <sec> | Settings toast <on|off> | Settings log <on|off> | Settings radius <n> | Settings bindip <ip|auto>")
 end
 
 local function doSettingsSet(key, val)
@@ -1030,6 +1060,15 @@ local function doSettingsSet(key, val)
   elseif key == "radius" then
     local n = tonumber(val)
     if n and n > 0 then s.scanRadius = n else notifyError("Radius must be a positive number."); return end
+  elseif key == "bindip" then
+    local v = (val or ""):lower()
+    if v == "" or v == "auto" then
+      s.bindIP = ""
+    elseif ipParts(val) then
+      s.bindIP = val
+    else
+      notifyError("bindip must be a valid IPv4 address (e.g. 192.168.178.50) or \"auto\"."); return
+    end
   else
     notifyError("Unknown setting: " .. tostring(key))
     return
@@ -1058,7 +1097,7 @@ local function doHelp()
     "  Batch [range]               - batch-link+apply an MA3 selection (or typed range), matched by IP order",
     "  Rename <ip>                 - write the head's name onto its linked MA3 fixture (confirms every time)",
     "  NetworkSettings              - open MA3's My Network Interfaces settings (per-adapter DHCP/IP/Mask/Gateway)",
-    "  Settings / Settings <k> <v> - view or change poll interval, toasts, logging, scan radius",
+    "  Settings / Settings <k> <v> - view or change poll interval, toasts, logging, scan radius, network interface",
     "  Help                        - this list",
   }
   for _, l in ipairs(lines) do Printf(l) end
@@ -1599,10 +1638,13 @@ doSettingsDialog = function()
 
   local result = MessageBox({
     title = "MiniHead Settings",
-    message = "Poll interval and scan radius apply next time you Discover/Refresh.",
+    message = "Poll interval and scan radius apply next time you Discover/Refresh.\n" ..
+      "Network Interface: local IP to send head traffic from - blank/\"auto\" lets MA3's " ..
+      "OS pick one, or pin a specific adapter's IP (see NetworkSettings) if that's wrong.",
     inputs = {
       { name = "Poll Interval (s)", value = tostring(s.pollInterval) },
       { name = "Scan Radius", value = tostring(s.scanRadius) },
+      { name = "Network Interface", value = s.bindIP or '' },
     },
     states = {
       { name = "Toast on Error", state = s.toastEnabled and true or false },
@@ -1620,12 +1662,21 @@ doSettingsDialog = function()
       local radiusN = tonumber(result.inputs["Scan Radius"])
       if pollN and pollN >= 5 then s.pollInterval = pollN end
       if radiusN and radiusN > 0 then s.scanRadius = radiusN end
+      local bindIn = (result.inputs["Network Interface"] or ''):match("^%s*(.-)%s*$") -- trim
+      if bindIn == '' or bindIn:lower() == 'auto' then
+        s.bindIP = ''
+      elseif ipParts(bindIn) then
+        s.bindIP = bindIn
+      else
+        notifyError("Network Interface \"" .. bindIn .. "\" isn't a valid IPv4 address - left unchanged.")
+      end
     end
     if result.states then
       if result.states["Toast on Error"] ~= nil then s.toastEnabled = result.states["Toast on Error"] end
       if result.states["Command-line Log"] ~= nil then s.cmdlineLogEnabled = result.states["Command-line Log"] end
     end
     saveSettings(s)
+    currentBindIP = nz(s.bindIP, nil) -- so the window this reopens reflects it immediately
     notifyInfo("Settings saved.")
   end
 
@@ -1645,6 +1696,10 @@ function Main(display_handle, arg)
   local tokens = tokenize(arg)
   local cmd = (tokens[1] or ""):lower()
   table.remove(tokens, 1)
+
+  -- Every command path (including Window/title bar) should see the same
+  -- chosen interface, so this runs once here rather than per-command.
+  currentBindIP = nz(loadSettings().bindIP, nil)
 
   if cmd == "" then
     local settings = loadSettings()
