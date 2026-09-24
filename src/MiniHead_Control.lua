@@ -1347,21 +1347,23 @@ doWindow = function()
     -- wash. Left baseLayer at its default background.
 
     -- Title bar
-    -- NOTE: a 4th titleBar[N][N] SizePolicy override (for a Display button
-    -- that used to live here) crashed live with the exact same "attempt to
-    -- index a nil value (field 'integer index')" error the UILayoutGrid
-    -- cell-indexing bug threw (see headerGrid's note below) - Columns=3
-    -- with 2 explicit [N][N] overrides is the confirmed-working ceiling for
-    -- TitleBar, going to Columns=4/3 overrides broke it. Kept at 3; the
-    -- Display button moved to headerGrid instead (below).
+    -- NOTE: the ONLY version of this title bar ever actually confirmed
+    -- rendering live (via screenshot) was Columns=2 with a single
+    -- titleBar[2][2] override (title + close). A later 3-column version
+    -- (title + net-status + close, adding titleBar[3][3]) was deployed but
+    -- never actually re-confirmed live before other changes piled on top -
+    -- and it turned out to be broken too ("attempt to index a nil value
+    -- (field 'integer index')" at the [3][3] access), not just the 4-column
+    -- attempt that came after it. So TitleBar's [N][N] cell indexing here
+    -- is only trusted for a single override now. Both the net-status label
+    -- and the Display button live in headerGrid below instead, which never
+    -- used [N][N] indexing to begin with.
     local titleBar = baseLayer:Append('TitleBar')
-    titleBar.Columns = 3
+    titleBar.Columns = 2
     titleBar.Rows = 1
     titleBar.Anchors = '0,0'
     titleBar[2][2].SizePolicy = 'Fixed'
-    titleBar[2][2].Size = 230
-    titleBar[3][3].SizePolicy = 'Fixed'
-    titleBar[3][3].Size = 50
+    titleBar[2][2].Size = 50
     titleBar.Texture = 'corner2'
     titleBar.Transparent = "No"
 
@@ -1371,35 +1373,23 @@ doWindow = function()
     titleIcon.Texture = 'corner1'
     titleIcon.Anchors = '0,0'
 
-    -- Network status: computed once when the window opens (same snapshot
-    -- limitation as the head table - close/reopen to refresh). Answers the
-    -- console's own connectivity at a glance, e.g. to spot a subnet
-    -- mismatch like a head on 192.168.2.x while MA3 is on 192.168.178.x.
-    local myIP = getLocalIP()
-    local netStatusLbl = titleBar:Append('TitleButton')
-    netStatusLbl.Font = 'Regular14'
-    netStatusLbl.Text = myIP and ('MA IP: ' .. myIP) or 'No Network'
-    netStatusLbl.HasHover = 'No'
-    netStatusLbl.Anchors = '1,0'
-    tryColor(netStatusLbl, 'TextColor', myIP and 'Global.LabelText' or 'Global.AlertText')
-
     local titleClose = titleBar:Append('CloseButton')
-    titleClose.Anchors = '2,0'
+    titleClose.Anchors = '1,0'
     titleClose.Texture = 'corner2'
     titleClose.PluginComponent = myHandle
     titleClose.Clicked = 'MH_CloseClicked'
 
-    -- Header actions: Discover / Refresh / Display / Settings.
-    -- NOTE: explicit per-cell [col][row].SizePolicy (like BaseInput uses)
-    -- crashed here on a UILayoutGrid ("attempt to index a nil value") -
-    -- that indexing pattern is BaseInput-specific, not general. Reverted to
-    -- the plain Columns/Rows + per-child Anchors pattern confirmed working
-    -- by the community examples' own button grids - equal-width columns,
-    -- less tight than intended but reliable. This is also why Display
-    -- lives here rather than in the title bar (see titleBar's note above).
+    -- Header actions: Discover / Refresh / Display / Settings / network
+    -- status. NOTE: explicit per-cell [col][row].SizePolicy (like BaseInput
+    -- uses) crashed here on a UILayoutGrid ("attempt to index a nil value")
+    -- - that indexing pattern is BaseInput-specific, not general. This grid
+    -- has always used the plain Columns/Rows + per-child Anchors pattern
+    -- instead (equal-width columns, less tight than intended but reliable),
+    -- which is also why the net-status label and Display button both live
+    -- here now rather than in the title bar (see its note above).
     local headerGrid = baseLayer:Append('UILayoutGrid')
     headerGrid.Anchors = '0,1'
-    headerGrid.Columns = 4
+    headerGrid.Columns = 5
     headerGrid.Rows = 1
 
     local discoverBtn = headerGrid:Append('Button')
@@ -1433,6 +1423,18 @@ doWindow = function()
     settingsBtn.HasHover = 'Yes'
     settingsBtn.PluginComponent = myHandle
     settingsBtn.Clicked = 'MH_SettingsClicked'
+
+    -- Network status: computed once when the window opens (same snapshot
+    -- limitation as the head table - close/reopen to refresh). Answers the
+    -- console's own connectivity at a glance, e.g. to spot a subnet
+    -- mismatch like a head on 192.168.2.x while MA3 is on 192.168.178.x.
+    -- Non-interactive (HasHover='No'), same pattern as the row labels below.
+    local myIP = getLocalIP()
+    local netStatusLbl = headerGrid:Append('Button')
+    netStatusLbl.Anchors = '4,0'
+    netStatusLbl.Text = myIP and ('MA IP: ' .. myIP) or 'No Network'
+    netStatusLbl.HasHover = 'No'
+    tryColor(netStatusLbl, 'TextColor', myIP and 'Global.LabelText' or 'Global.AlertText')
 
     -- Scrollable head list
     local dialog = baseLayer:Append('DialogFrame')
