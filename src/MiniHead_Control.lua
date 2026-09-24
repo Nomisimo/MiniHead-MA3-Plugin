@@ -1057,7 +1057,7 @@ local function doHelp()
     "  DemoAll / DemoOff           - start/stop the sinusoid demo animation on all heads",
     "  Batch [range]               - batch-link+apply an MA3 selection (or typed range), matched by IP order",
     "  Rename <ip>                 - write the head's name onto its linked MA3 fixture (confirms every time)",
-    "  NetworkSettings              - open MA3's Art-Net Connector Configuration menu",
+    "  NetworkSettings              - open MA3's My Network Interfaces settings (per-adapter DHCP/IP/Mask/Gateway)",
     "  Settings / Settings <k> <v> - view or change poll interval, toasts, logging, scan radius",
     "  Help                        - this list",
   }
@@ -1571,7 +1571,12 @@ doWindow = function()
     -- "Menu 'Patch'.'Edit'" confirmed from grandMA3's own shipped
     -- menu_selector.uixml (the SignalValue behind its own "Patch" button).
     signalTable.MH_OpenPatchClicked = function(caller) Cmd('Menu "Patch"."Edit"') end
-    signalTable.MH_NetworkSettingsClicked = function(caller) Cmd('Menu "ConnectorConfig"') end
+    -- "Menu 'RemoteIpEditor'" confirmed from grandMA3's own shipped user
+    -- manual (network_interface.html) as the command-line shortcut to open
+    -- the "My Network Interfaces" pop-up - the actual per-adapter DHCP/IP/
+    -- Mask/Gateway settings, not the Art-Net Connector Configuration menu
+    -- this used to open.
+    signalTable.MH_NetworkSettingsClicked = function(caller) Cmd("Menu 'RemoteIpEditor'") end
 
   end)
 
@@ -1667,7 +1672,7 @@ function Main(display_handle, arg)
   elseif cmd == "demooff" then doDemoAll(false)
   elseif cmd == "batch" then doBatch(table.concat(tokens, " "))
   elseif cmd == "rename" then doRename(tokens[1])
-  elseif cmd == "networksettings" then Cmd('Menu "ConnectorConfig"')
+  elseif cmd == "networksettings" then Cmd("Menu 'RemoteIpEditor'")
   elseif cmd == "settings" then
     if tokens[1] and tokens[2] then doSettingsSet(tokens[1], tokens[2]) else doSettings() end
   elseif cmd == "help" then doHelp()

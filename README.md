@@ -10,7 +10,7 @@
 - Links each head to an MA3 fixture number, editable either by typing or from the current floor/command-line selection
 - Pushes fixture ID + DMX patch (universe/address, read straight from MA3's own patch) to a head over HTTP — one at a time, or batch-applied across a selected fixture range matched to heads in IP order
 - Identify / Blackout / Rainbow-Demo, per head and fleet-wide
-- One-command shortcut to MA3's native Art-Net Connector Configuration menu
+- One-command shortcut to MA3's native My Network Interfaces settings (per-adapter DHCP/IP/Mask/Gateway)
 - Optional, always-confirmed write-back of a head's name onto its linked MA3 fixture
 
 Full feature spec: [`MiniHead-MA3-Plugin-Spec.md`](MiniHead-MA3-Plugin-Spec.md).
@@ -54,7 +54,7 @@ That opens the clickable UI — no typing needed from here on. Or `Plugin 4 "Hel
 | `RainbowAll` / `RainbowOff` | Start/stop the rainbow demo fleet-wide |
 | `Batch [range]` | Batch-link + apply a selected (or typed) fixture range, matched to heads sorted by IP |
 | `Rename <ip>` | Write the head's name onto its linked MA3 fixture (confirms every time) |
-| `NetworkSettings` | Open MA3's Art-Net Connector Configuration menu |
+| `NetworkSettings` | Open MA3's My Network Interfaces settings (per-adapter DHCP/IP/Mask/Gateway) |
 | `Settings [key value]` | View/change poll interval, toasts, command-line logging, scan radius |
 | `Help` | Print this list in-console |
 
