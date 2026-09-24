@@ -1347,16 +1347,21 @@ doWindow = function()
     -- wash. Left baseLayer at its default background.
 
     -- Title bar
+    -- NOTE: a 4th titleBar[N][N] SizePolicy override (for a Display button
+    -- that used to live here) crashed live with the exact same "attempt to
+    -- index a nil value (field 'integer index')" error the UILayoutGrid
+    -- cell-indexing bug threw (see headerGrid's note below) - Columns=3
+    -- with 2 explicit [N][N] overrides is the confirmed-working ceiling for
+    -- TitleBar, going to Columns=4/3 overrides broke it. Kept at 3; the
+    -- Display button moved to headerGrid instead (below).
     local titleBar = baseLayer:Append('TitleBar')
-    titleBar.Columns = 4
+    titleBar.Columns = 3
     titleBar.Rows = 1
     titleBar.Anchors = '0,0'
     titleBar[2][2].SizePolicy = 'Fixed'
     titleBar[2][2].Size = 230
     titleBar[3][3].SizePolicy = 'Fixed'
-    titleBar[3][3].Size = 90
-    titleBar[4][4].SizePolicy = 'Fixed'
-    titleBar[4][4].Size = 50
+    titleBar[3][3].Size = 50
     titleBar.Texture = 'corner2'
     titleBar.Transparent = "No"
 
@@ -1378,34 +1383,23 @@ doWindow = function()
     netStatusLbl.Anchors = '1,0'
     tryColor(netStatusLbl, 'TextColor', myIP and 'Global.LabelText' or 'Global.AlertText')
 
-    -- Display management: opens a picker (Section 8's resolveTargetDisplay/
-    -- probeDisplays) so the window can be pinned to always open on a chosen
-    -- display instead of wherever GetFocusDisplay() happens to be.
-    local curDisplayIdx = loadSettings().displayIndex or 0
-    local displayBtn = titleBar:Append('TitleButton')
-    displayBtn.Font = 'Regular14'
-    displayBtn.Text = curDisplayIdx > 0 and ('Display ' .. curDisplayIdx) or 'Display: Auto'
-    displayBtn.HasHover = 'Yes'
-    displayBtn.Anchors = '2,0'
-    displayBtn.PluginComponent = myHandle
-    displayBtn.Clicked = 'MH_DisplayPickerClicked'
-
     local titleClose = titleBar:Append('CloseButton')
-    titleClose.Anchors = '3,0'
+    titleClose.Anchors = '2,0'
     titleClose.Texture = 'corner2'
     titleClose.PluginComponent = myHandle
     titleClose.Clicked = 'MH_CloseClicked'
 
-    -- Header actions: Discover / Refresh / Settings.
+    -- Header actions: Discover / Refresh / Display / Settings.
     -- NOTE: explicit per-cell [col][row].SizePolicy (like BaseInput uses)
     -- crashed here on a UILayoutGrid ("attempt to index a nil value") -
     -- that indexing pattern is BaseInput-specific, not general. Reverted to
     -- the plain Columns/Rows + per-child Anchors pattern confirmed working
     -- by the community examples' own button grids - equal-width columns,
-    -- less tight than intended but reliable.
+    -- less tight than intended but reliable. This is also why Display
+    -- lives here rather than in the title bar (see titleBar's note above).
     local headerGrid = baseLayer:Append('UILayoutGrid')
     headerGrid.Anchors = '0,1'
-    headerGrid.Columns = 3
+    headerGrid.Columns = 4
     headerGrid.Rows = 1
 
     local discoverBtn = headerGrid:Append('Button')
@@ -1422,8 +1416,19 @@ doWindow = function()
     refreshBtn.PluginComponent = myHandle
     refreshBtn.Clicked = 'MH_RefreshClicked'
 
+    -- Display management: opens a picker (Section 8's resolveTargetDisplay/
+    -- probeDisplays) so the window can be pinned to always open on a chosen
+    -- display instead of wherever GetFocusDisplay() happens to be.
+    local curDisplayIdx = loadSettings().displayIndex or 0
+    local displayBtn = headerGrid:Append('Button')
+    displayBtn.Anchors = '2,0'
+    displayBtn.Text = curDisplayIdx > 0 and ('Display ' .. curDisplayIdx) or 'Display: Auto'
+    displayBtn.HasHover = 'Yes'
+    displayBtn.PluginComponent = myHandle
+    displayBtn.Clicked = 'MH_DisplayPickerClicked'
+
     local settingsBtn = headerGrid:Append('Button')
-    settingsBtn.Anchors = '2,0'
+    settingsBtn.Anchors = '3,0'
     settingsBtn.Text = 'Settings'
     settingsBtn.HasHover = 'Yes'
     settingsBtn.PluginComponent = myHandle
