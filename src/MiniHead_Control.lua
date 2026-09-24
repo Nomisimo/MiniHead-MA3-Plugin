@@ -369,6 +369,27 @@ end
 -- libraries - not a custom/guessed API this time).
 -- ============================================================================
 
+-- No grandMA3 Lua function exposes "what's my own IP" (checked HelpLua's
+-- full export - nothing there). Standard LuaSocket trick instead: connect
+-- a UDP socket to any routable address (no packet is actually sent - UDP
+-- "connect" just asks the OS to pick a local address via the routing
+-- table) then read that address back with getsockname(). Returns nil if
+-- there's no route at all (no network connection).
+local function getLocalIP()
+  local ok, ip = pcall(function()
+    local socket = require("socket")
+    local s = socket.udp()
+    if not s then return nil end
+    local peered = s:setpeername("8.8.8.8", 80)
+    if not peered then s:close(); return nil end
+    local localip = s:getsockname()
+    s:close()
+    return localip
+  end)
+  if ok and ip and ip ~= "" and ip ~= "0.0.0.0" then return ip end
+  return nil
+end
+
 local function buildHttpRequest(method, ip, path, bodyStr)
   local lines = {}
   lines[#lines + 1] = method .. " " .. path .. " HTTP/1.1"
@@ -1232,11 +1253,13 @@ doWindow = function()
 
     -- Title bar
     local titleBar = baseLayer:Append('TitleBar')
-    titleBar.Columns = 2
+    titleBar.Columns = 3
     titleBar.Rows = 1
     titleBar.Anchors = '0,0'
     titleBar[2][2].SizePolicy = 'Fixed'
-    titleBar[2][2].Size = 50
+    titleBar[2][2].Size = 230
+    titleBar[3][3].SizePolicy = 'Fixed'
+    titleBar[3][3].Size = 50
     titleBar.Texture = 'corner2'
     titleBar.Transparent = "No"
 
@@ -1246,8 +1269,20 @@ doWindow = function()
     titleIcon.Texture = 'corner1'
     titleIcon.Anchors = '0,0'
 
+    -- Network status: computed once when the window opens (same snapshot
+    -- limitation as the head table - close/reopen to refresh). Answers the
+    -- console's own connectivity at a glance, e.g. to spot a subnet
+    -- mismatch like a head on 192.168.2.x while MA3 is on 192.168.178.x.
+    local myIP = getLocalIP()
+    local netStatusLbl = titleBar:Append('TitleButton')
+    netStatusLbl.Font = 'Regular14'
+    netStatusLbl.Text = myIP and ('MA IP: ' .. myIP) or 'No Network'
+    netStatusLbl.HasHover = 'No'
+    netStatusLbl.Anchors = '1,0'
+    tryColor(netStatusLbl, 'TextColor', myIP and 'Global.LabelText' or 'Global.AlertText')
+
     local titleClose = titleBar:Append('CloseButton')
-    titleClose.Anchors = '1,0'
+    titleClose.Anchors = '2,0'
     titleClose.Texture = 'corner2'
     titleClose.PluginComponent = myHandle
     titleClose.Clicked = 'MH_CloseClicked'
