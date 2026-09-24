@@ -43,6 +43,8 @@ That opens the clickable UI — no typing needed from here on. Or `Plugin 4 "Hel
 |---|---|
 | `Window` | Open the full window — table of all heads, per-row Apply/Identify, global actions (experimental, actively being live-tested) |
 | `Close` / `CloseWindow` | Close the window from a macro/executor button instead of clicking its X |
+| `ToggleWindow` | Open it if closed, close it if open — one button for both |
+| `CreateToggleMacro [macro#] [plugin#]` | Auto-creates a macro that runs `ToggleWindow` — confirms before writing, **not yet live-tested** |
 | `Menu` | Open the clickable menu — buttons + an editable Fix# field, no typing needed |
 | `Discover [ip]` | Seed a head IP, pull `/api/heads`, scan nearby addresses for extras |
 | `List` | Show the head table as plain text (status, IP, name, linked fixture, patch) |

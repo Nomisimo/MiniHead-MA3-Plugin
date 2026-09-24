@@ -327,6 +327,24 @@ local function saveHeads(list)
   pcall(function() SetVar(GlobalVars(), HEADS_VAR, json.encode(list)) end)
 end
 
+-- Tracks whether the window is currently open, for ToggleWindow (Section
+-- 11.6). Set true right after a successful build in doWindow(), set false
+-- by a genuine close (the X button, or the standalone Close command) - NOT
+-- by the internal clear+rebuild cycles Settings/the Display picker use, so
+-- those correctly read as "still open" throughout. Known limitation: if the
+-- window's own busy-wait loop ever hits its guard cap instead of a real
+-- close (shouldn't happen in normal use - see doWindow()'s comment), this
+-- goes stale and Toggle would try to close an already-gone window - same
+-- class of snapshot-staleness as the rest of this plugin's known v1 limits.
+local WINDOW_OPEN_VAR = "MiniHead_WindowOpen"
+local function setWindowOpen(isOpen)
+  pcall(function() SetVar(GlobalVars(), WINDOW_OPEN_VAR, isOpen and "1" or "0") end)
+end
+local function isWindowOpen()
+  local ok, v = pcall(function() return GetVar(GlobalVars(), WINDOW_OPEN_VAR) end)
+  return ok and v == "1"
+end
+
 -- ============================================================================
 -- SECTION 4: Feedback / error surfacing (spec S6)
 -- Printf writes to the Command Line History; Confirm(..., false) is used as
@@ -1136,6 +1154,8 @@ local function doHelp()
     "  Menu                        - open the clickable menu (buttons + fields, no typing)",
     "  Window                      - open the full custom window (experimental, see docs)",
     "  Close / CloseWindow         - close the window from a macro/executor button instead of clicking its X",
+    "  ToggleWindow                - open it if closed, close it if open - one button for both",
+    "  CreateToggleMacro [macro#] [plugin#] - auto-creates a macro that runs ToggleWindow (confirms before writing, not yet live-tested)",
     "  Discover [ip]               - set/seed a head IP, pull /api/heads, scan nearby",
     "  List                        - show the head table (plain text)",
     "  Refresh                     - re-check online status + re-pull head list",
@@ -1302,6 +1322,7 @@ end
 local function doCloseWindow()
   local ok, err = pcall(function() resolveTargetDisplay().ScreenOverlay:ClearUIChildren() end)
   if not ok then notifyError("Close failed: " .. tostring(err)) end
+  setWindowOpen(false)
 end
 
 -- doWindow, doSettingsDialog and doDisplayPicker close one another (each
@@ -1311,6 +1332,18 @@ end
 local doWindow
 local doSettingsDialog
 local doDisplayPicker
+
+-- ToggleWindow: for a single macro/executor button that opens the window
+-- when it's closed and closes it when it's open, instead of needing
+-- separate Window/Close buttons. Relies on isWindowOpen()'s tracked state
+-- (see its comment above for the one known staleness edge case).
+local function doToggleWindow()
+  if isWindowOpen() then
+    doCloseWindow()
+  else
+    doWindow()
+  end
+end
 
 doWindow = function()
   local heads = loadHeads()
@@ -1702,6 +1735,7 @@ doWindow = function()
     -- window's overlay stuck on screen.
     signalTable.MH_CloseClicked = function(caller)
       targetDisplay.ScreenOverlay:ClearUIChildren()
+      setWindowOpen(false)
       continue = true
     end
     signalTable.MH_DiscoverClicked = function(caller) doDiscover(nil) end
@@ -1756,6 +1790,7 @@ doWindow = function()
     return
   end
 
+  setWindowOpen(true)
   local guard = 0
   repeat
     guard = guard + 1
@@ -1850,6 +1885,74 @@ doDisplayPicker = function()
 end
 
 -- ============================================================================
+-- SECTION 11.7: Toggle macro creation
+-- Ground truth from grandMA3's own shipped user manual ("Create a Macro
+-- by Using the Command Line" in macro_create.html): ChangeDestination /
+-- Store / Insert / Set are real, documented command-line steps for
+-- building a macro entirely via Cmd() - not guessed. What IS best-effort:
+-- (a) this plugin reading its own pool number back (no HelpLua function
+-- for that - Get(myHandle, "No") is tried, but unconfirmed, hence still
+-- user-editable/confirmable below rather than trusted blindly), and (b)
+-- the exact quoting Set expects for a value that itself contains quotes
+-- (single-quote-wraps the value, mirroring the already-confirmed
+-- Cmd('Menu "Patch"."Edit"') pattern one level up). Not yet live-tested -
+-- report back exactly what ends up in the macro pool.
+-- ============================================================================
+
+local function guessOwnPluginPoolNumber()
+  local ok, n = pcall(function() return Get(myHandle, "No") end)
+  if ok and n and tonumber(n) then return tostring(tonumber(n)) end
+  return ""
+end
+
+-- Writes to the real Macro pool (creates, or OVERWRITES whatever's already
+-- at that number) - always confirmed via dialog first, even when both
+-- args are passed in from the command line, same as every other
+-- pool/showfile-affecting action in this plugin (Rename's confirm, etc.).
+local function doCreateToggleMacro(macroNumArg, pluginNumArg)
+  local defaultPluginNum = (pluginNumArg and pluginNumArg ~= "") and pluginNumArg or guessOwnPluginPoolNumber()
+
+  local result = MessageBox({
+    title = "MiniHead - Create Toggle Macro",
+    message = "Creates (or OVERWRITES) a macro with one line: Plugin <n> \"ToggleWindow\".\n" ..
+      "Double-check both numbers - anything already stored at that macro number will be replaced. " ..
+      "Plugin Pool # is whatever number you run this plugin as (Plugin <n> \"...\") - auto-filled below if readable, check it either way.",
+    inputs = {
+      { name = "Macro #", value = tostring(macroNumArg or '') },
+      { name = "Plugin Pool #", value = tostring(defaultPluginNum or '') },
+    },
+    commands = {
+      { value = 1, name = "Create" },
+      { value = 0, name = "Cancel" },
+    },
+  })
+  if not (result and result.success and result.result == 1) then
+    notifyInfo("Toggle macro creation cancelled.")
+    return
+  end
+
+  local macroNum = result.inputs and tonumber(result.inputs["Macro #"])
+  local pluginNum = result.inputs and tonumber(result.inputs["Plugin Pool #"])
+  if not macroNum or macroNum <= 0 then
+    notifyError("Macro # must be a positive whole number."); return
+  end
+  if not pluginNum or pluginNum <= 0 then
+    notifyError("Plugin Pool # must be a positive whole number - check the number this plugin is actually imported/running at."); return
+  end
+
+  local toggleCmdText = 'Plugin ' .. tostring(pluginNum) .. ' "ToggleWindow"'
+  pcall(function() Cmd("ChangeDestination Macro") end)
+  pcall(function() Cmd("Store " .. tostring(macroNum)) end)
+  pcall(function() Cmd("ChangeDestination " .. tostring(macroNum)) end)
+  pcall(function() Cmd("Insert") end)
+  pcall(function() Cmd('Set 1 Property "Command" \'' .. toggleCmdText .. '\'') end)
+  pcall(function() Cmd("ChangeDestination Root") end)
+
+  notifyInfo("Macro " .. macroNum .. " should now contain: " .. toggleCmdText ..
+    " - check the Macro pool and test it before relying on it.")
+end
+
+-- ============================================================================
 -- SECTION 12: Entry point
 -- Confirmed convention for this build: the script's outermost chunk must
 -- RETURN its entry function(s) - `function Main(...)` alone (without the
@@ -1878,6 +1981,8 @@ function Main(display_handle, arg)
   if cmd == "menu" then return doMenu()
   elseif cmd == "window" then doWindow()
   elseif cmd == "close" or cmd == "closewindow" then doCloseWindow()
+  elseif cmd == "togglewindow" then doToggleWindow()
+  elseif cmd == "createtogglemacro" then doCreateToggleMacro(tokens[1], tokens[2])
   elseif cmd == "list" then renderHeadsTable()
   elseif cmd == "discover" then doDiscover(tokens[1])
   elseif cmd == "refresh" then doRefresh()
