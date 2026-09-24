@@ -1488,9 +1488,20 @@ doWindow = function()
       signalTable['MH_Edit' .. i] = function(caller)
         local head2 = findHeadByIp(ip)
         if not head2 then return end
+        -- Prefill from whatever was last successfully pushed, falling back
+        -- to MA3's own live patch for this Fix# - the same source doApply()
+        -- itself falls back to when nothing's been pushed yet (see below).
+        -- Without this fallback the field showed blank even when MA3
+        -- already had a real patch, which read as "address is set but this
+        -- dialog doesn't know it."
         local uaddrStr = ''
         if head2.universe and head2.addr then
           uaddrStr = head2.universe .. "." .. string.format("%03d", head2.addr)
+        else
+          local mu, ma = ma3ReadPatch(head2.fixtureNo)
+          if mu and ma then
+            uaddrStr = mu .. "." .. string.format("%03d", ma)
+          end
         end
         local result = MessageBox({
           title = "Edit - " .. nz(head2.name, ip),
