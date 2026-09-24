@@ -1135,6 +1135,7 @@ local function doHelp()
     "MiniHead Control - commands, e.g. Plugin \"MiniHead Control\" \"List\":",
     "  Menu                        - open the clickable menu (buttons + fields, no typing)",
     "  Window                      - open the full custom window (experimental, see docs)",
+    "  Close / CloseWindow         - close the window from a macro/executor button instead of clicking its X",
     "  Discover [ip]               - set/seed a head IP, pull /api/heads, scan nearby",
     "  List                        - show the head table (plain text)",
     "  Refresh                     - re-check online status + re-pull head list",
@@ -1288,6 +1289,20 @@ end
 -- reopen (Window command) to see fresh state. Only Close rebuilds nothing
 -- and just tears the window down.
 -- ============================================================================
+
+-- Closes the window from a standalone command (Close/CloseWindow), not a
+-- click inside it - useful as its own macro/executor button, or when the
+-- window is pinned to a display you're not standing in front of. This
+-- doesn't (can't) reach into the running Window invocation's own busy-wait
+-- loop - each Plugin call is its own Lua task, so there's no shared
+-- "continue" variable to set from here - it just clears the overlay the
+-- same way MH_CloseClicked does. The other task's loop then just spins
+-- uselessly in the background until its guard cap, same as already happens
+-- today when Open Patch/Network Settings visually displace the window.
+local function doCloseWindow()
+  local ok, err = pcall(function() resolveTargetDisplay().ScreenOverlay:ClearUIChildren() end)
+  if not ok then notifyError("Close failed: " .. tostring(err)) end
+end
 
 -- doWindow, doSettingsDialog and doDisplayPicker close one another (each
 -- closes the main window and opens itself; closing any of them reopens the
@@ -1862,6 +1877,7 @@ function Main(display_handle, arg)
 
   if cmd == "menu" then return doMenu()
   elseif cmd == "window" then doWindow()
+  elseif cmd == "close" or cmd == "closewindow" then doCloseWindow()
   elseif cmd == "list" then renderHeadsTable()
   elseif cmd == "discover" then doDiscover(tokens[1])
   elseif cmd == "refresh" then doRefresh()
