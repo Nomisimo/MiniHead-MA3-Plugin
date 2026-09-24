@@ -1609,13 +1609,32 @@ doWindow = function()
     signalTable.MH_DemoAllClicked = function(caller) doDemoAll(true) end
     -- "Menu 'Patch'.'Edit'" confirmed from grandMA3's own shipped
     -- menu_selector.uixml (the SignalValue behind its own "Patch" button).
-    signalTable.MH_OpenPatchClicked = function(caller) Cmd('Menu "Patch"."Edit"') end
+    --
+    -- Opening ANY native "Menu ..." popup appears to displace this plugin's
+    -- own ScreenOverlay - not something these handlers do themselves (they
+    -- don't call ClearUIChildren), so it looks like both share one overlay
+    -- layer at the engine level and the native one wins. Cmd() is fire-and-
+    -- forget - it doesn't block until that popup closes - so there's no
+    -- confirmed hook to rebuild this window exactly when the user is done
+    -- with Patch/My Interfaces. Rebuilding immediately here was tried and
+    -- rejected: it races the popup that's still opening and is more likely
+    -- to cover it than to help. Setting continue=true at least ends this
+    -- busy-wait cleanly instead of spinning uselessly once the overlay's
+    -- gone - see Plugin <n> "Window" on a macro/executor button (README) for
+    -- a fast, deliberate way back in.
+    signalTable.MH_OpenPatchClicked = function(caller)
+      Cmd('Menu "Patch"."Edit"')
+      continue = true
+    end
     -- "Menu 'RemoteIpEditor'" confirmed from grandMA3's own shipped user
     -- manual (network_interface.html) as the command-line shortcut to open
     -- the "My Network Interfaces" pop-up - the actual per-adapter DHCP/IP/
     -- Mask/Gateway settings, not the Art-Net Connector Configuration menu
-    -- this used to open.
-    signalTable.MH_NetworkSettingsClicked = function(caller) Cmd("Menu 'RemoteIpEditor'") end
+    -- this used to open. Same displacement caveat as Open Patch above.
+    signalTable.MH_NetworkSettingsClicked = function(caller)
+      Cmd("Menu 'RemoteIpEditor'")
+      continue = true
+    end
 
   end)
 
