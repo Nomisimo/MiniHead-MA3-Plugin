@@ -1155,7 +1155,7 @@ local function doHelp()
     "  Window                      - open the full custom window (experimental, see docs)",
     "  Close / CloseWindow         - close the window from a macro/executor button instead of clicking its X",
     "  ToggleWindow                - open it if closed, close it if open - one button for both",
-    "  CreateToggleMacro [macro#] [plugin#] - auto-creates a macro that runs ToggleWindow (confirms before writing, not yet live-tested)",
+    "  Macro [macro#] [plugin#]    - auto-creates a macro that runs ToggleWindow (confirms before writing, not yet live-tested; alias: CreateToggleMacro)",
     "  Discover [ip]               - set/seed a head IP, pull /api/heads, scan nearby",
     "  List                        - show the head table (plain text)",
     "  Refresh                     - re-check online status + re-pull head list",
@@ -1982,7 +1982,7 @@ function Main(display_handle, arg)
   elseif cmd == "window" then doWindow()
   elseif cmd == "close" or cmd == "closewindow" then doCloseWindow()
   elseif cmd == "togglewindow" then doToggleWindow()
-  elseif cmd == "createtogglemacro" then doCreateToggleMacro(tokens[1], tokens[2])
+  elseif cmd == "macro" or cmd == "createtogglemacro" then doCreateToggleMacro(tokens[1], tokens[2])
   elseif cmd == "list" then renderHeadsTable()
   elseif cmd == "discover" then doDiscover(tokens[1])
   elseif cmd == "refresh" then doRefresh()
