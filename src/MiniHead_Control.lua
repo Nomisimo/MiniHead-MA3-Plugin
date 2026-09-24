@@ -745,13 +745,20 @@ local function doDiscover(seedIp)
     notifyInfo("Connected to " .. seedIp .. " but it returned no /api/heads list - added it alone.")
   end
 
-  -- Preserve existing fixture links for heads we already knew about.
+  -- Preserve existing fixture links AND last-pushed patch for heads we
+  -- already knew about - /api/heads never returns universe/addr (it's not
+  -- something the ESP reports, only what this plugin last successfully
+  -- pushed), so without this every Discover silently wiped it back to
+  -- "not patched" even though the ESP still had it.
   local existing = loadHeads()
   local byIp = {}
   for _, h in ipairs(existing) do byIp[h.ip] = h end
   for _, h in ipairs(heads) do
     local prev = byIp[h.ip]
-    if prev then h.fixtureNo = prev.fixtureNo end
+    if prev then
+      h.fixtureNo = prev.fixtureNo
+      h.universe, h.addr = prev.universe, prev.addr
+    end
   end
   saveHeads(heads)
 
@@ -785,9 +792,15 @@ local function doRefresh()
     local fresh = {}
     for _, h in ipairs(list) do
       local prev = prevByIp[h.ip]
+      -- universe/addr: /api/heads doesn't return a patch (only this plugin's
+      -- own "last successfully pushed" bookkeeping does), so carry it
+      -- forward same as fixtureNo - otherwise every Refresh wiped it back
+      -- to "not patched" even though the ESP still had the real address.
       fresh[#fresh + 1] = {
         mac = h.mac, ip = h.ip, name = h.name, role = h.role,
         fixtureNo = prev and prev.fixtureNo or ((h.fixID and h.fixID > 0) and h.fixID or nil),
+        universe = prev and prev.universe or nil,
+        addr = prev and prev.addr or nil,
         online = true,
       }
     end
