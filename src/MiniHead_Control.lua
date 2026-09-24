@@ -291,6 +291,7 @@ local function defaultSettings()
     cmdlineLogEnabled = true,
     scanRadius = 8,       -- +/- host addresses probed around the seed IP on Discover
     bindIP = "",          -- local network interface IP to use for head traffic; "" = auto-detect
+    displayIndex = 0,      -- which display the Window always opens on; 0 = follow focus (auto)
   }
 end
 
@@ -580,6 +581,32 @@ end
 -- "Universe"/"Address") - fails soft into the existing "not patched, apply
 -- anyway?" confirm flow rather than crashing. See verification-checklist.md.
 -- ============================================================================
+
+-- Display management: GetDisplayByIndex/GetFocusDisplay/GetDisplayIndex
+-- confirmed via the HelpLua export. Scope: this only pins the plugin's OWN
+-- window (Section 11.6) to a chosen display. MessageBox's documented
+-- signature also takes a display parameter, but using it to also relocate
+-- dialogs opened from the window (Edit, Settings, the picker below) is
+-- untested and deliberately left alone for now.
+local function resolveTargetDisplay()
+  local s = loadSettings()
+  if s.displayIndex and s.displayIndex > 0 then
+    local ok, h = pcall(GetDisplayByIndex, s.displayIndex)
+    if ok and h then return h end
+  end
+  return GetFocusDisplay()
+end
+
+-- No HelpLua-confirmed "how many displays exist" query, so this probes a
+-- generous but bounded range instead of guessing a count.
+local function probeDisplays()
+  local found = {}
+  for i = 1, 8 do
+    local ok, h = pcall(GetDisplayByIndex, i)
+    if ok and h then found[#found + 1] = i end
+  end
+  return found
+end
 
 -- Reads the DMX universe/address MA3 has patched for a fixture number.
 -- Returns universe, address (both nil if unpatched, or property name wrong).
@@ -1044,7 +1071,8 @@ local function doSettings()
   Printf("  Command-line log: " .. tostring(s.cmdlineLogEnabled))
   Printf("  Subnet scan radius: +/-" .. s.scanRadius)
   Printf("  Network interface: " .. (s.bindIP ~= "" and s.bindIP or "auto-detect"))
-  Printf("  Change with: Settings poll <sec> | Settings toast <on|off> | Settings log <on|off> | Settings radius <n> | Settings bindip <ip|auto>")
+  Printf("  Window display: " .. ((s.displayIndex or 0) > 0 and ("Display " .. s.displayIndex) or "auto (follows focus)"))
+  Printf("  Change with: Settings poll <sec> | Settings toast <on|off> | Settings log <on|off> | Settings radius <n> | Settings bindip <ip|auto> | Settings display <n|auto>")
 end
 
 local function doSettingsSet(key, val)
@@ -1068,6 +1096,18 @@ local function doSettingsSet(key, val)
       s.bindIP = val
     else
       notifyError("bindip must be a valid IPv4 address (e.g. 192.168.178.50) or \"auto\"."); return
+    end
+  elseif key == "display" then
+    local v = (val or ""):lower()
+    if v == "" or v == "auto" then
+      s.displayIndex = 0
+    else
+      local n = tonumber(val)
+      if n and n > 0 and n == math.floor(n) then
+        s.displayIndex = n
+      else
+        notifyError("display must be a positive whole number (display index, see the Window title bar's Display button) or \"auto\"."); return
+      end
     end
   else
     notifyError("Unknown setting: " .. tostring(key))
@@ -1097,7 +1137,7 @@ local function doHelp()
     "  Batch [range]               - batch-link+apply an MA3 selection (or typed range), matched by IP order",
     "  Rename <ip>                 - write the head's name onto its linked MA3 fixture (confirms every time)",
     "  NetworkSettings              - open MA3's My Network Interfaces settings (per-adapter DHCP/IP/Mask/Gateway)",
-    "  Settings / Settings <k> <v> - view or change poll interval, toasts, logging, scan radius, network interface",
+    "  Settings / Settings <k> <v> - view or change poll interval, toasts, logging, scan radius, network interface, window display",
     "  Help                        - this list",
   }
   for _, l in ipairs(lines) do Printf(l) end
@@ -1236,11 +1276,13 @@ end
 -- and just tears the window down.
 -- ============================================================================
 
--- doWindow and doSettingsDialog close one another (Settings closes the main
--- window and opens itself; OK/Cancel/close on Settings reopens the main
--- window), so both are forward-declared and call each other by upvalue.
+-- doWindow, doSettingsDialog and doDisplayPicker close one another (each
+-- closes the main window and opens itself; closing any of them reopens the
+-- main window), so all three are forward-declared and call each other by
+-- upvalue.
 local doWindow
 local doSettingsDialog
+local doDisplayPicker
 
 doWindow = function()
   local heads = loadHeads()
@@ -1266,7 +1308,8 @@ doWindow = function()
     -- 'Global.AlertText' / 'Global.WarningText' - NOT the raw ColorDef
     -- names like 'Global.Success' or ad-hoc ones like 'Global.Green'.
 
-    local baseLayer = GetFocusDisplay().ScreenOverlay:Append('BaseInput')
+    local targetDisplay = resolveTargetDisplay()
+    local baseLayer = targetDisplay.ScreenOverlay:Append('BaseInput')
     baseLayer.H = 570
     baseLayer.W = 940
     baseLayer.Columns = 1
@@ -1292,13 +1335,15 @@ doWindow = function()
 
     -- Title bar
     local titleBar = baseLayer:Append('TitleBar')
-    titleBar.Columns = 3
+    titleBar.Columns = 4
     titleBar.Rows = 1
     titleBar.Anchors = '0,0'
     titleBar[2][2].SizePolicy = 'Fixed'
     titleBar[2][2].Size = 230
     titleBar[3][3].SizePolicy = 'Fixed'
-    titleBar[3][3].Size = 50
+    titleBar[3][3].Size = 90
+    titleBar[4][4].SizePolicy = 'Fixed'
+    titleBar[4][4].Size = 50
     titleBar.Texture = 'corner2'
     titleBar.Transparent = "No"
 
@@ -1320,8 +1365,20 @@ doWindow = function()
     netStatusLbl.Anchors = '1,0'
     tryColor(netStatusLbl, 'TextColor', myIP and 'Global.LabelText' or 'Global.AlertText')
 
+    -- Display management: opens a picker (Section 8's resolveTargetDisplay/
+    -- probeDisplays) so the window can be pinned to always open on a chosen
+    -- display instead of wherever GetFocusDisplay() happens to be.
+    local curDisplayIdx = loadSettings().displayIndex or 0
+    local displayBtn = titleBar:Append('TitleButton')
+    displayBtn.Font = 'Regular14'
+    displayBtn.Text = curDisplayIdx > 0 and ('Display ' .. curDisplayIdx) or 'Display: Auto'
+    displayBtn.HasHover = 'Yes'
+    displayBtn.Anchors = '2,0'
+    displayBtn.PluginComponent = myHandle
+    displayBtn.Clicked = 'MH_DisplayPickerClicked'
+
     local titleClose = titleBar:Append('CloseButton')
-    titleClose.Anchors = '2,0'
+    titleClose.Anchors = '3,0'
     titleClose.Texture = 'corner2'
     titleClose.PluginComponent = myHandle
     titleClose.Clicked = 'MH_CloseClicked'
@@ -1602,17 +1659,27 @@ doWindow = function()
     netBtn.PluginComponent = myHandle
     netBtn.Clicked = 'MH_NetworkSettingsClicked'
 
-    -- Fixed-chrome click handlers
+    -- Fixed-chrome click handlers. Clear targetDisplay specifically (the
+    -- display this window instance actually opened on via the upvalue
+    -- above), not GetFocusDisplay() - once the window can be pinned to a
+    -- non-focused display, focus may have moved elsewhere by the time the
+    -- user clicks Close, and clearing the wrong display would leave this
+    -- window's overlay stuck on screen.
     signalTable.MH_CloseClicked = function(caller)
-      GetFocusDisplay().ScreenOverlay:ClearUIChildren()
+      targetDisplay.ScreenOverlay:ClearUIChildren()
       continue = true
     end
     signalTable.MH_DiscoverClicked = function(caller) doDiscover(nil) end
     signalTable.MH_RefreshClicked = function(caller) doRefresh() end
     signalTable.MH_SettingsClicked = function(caller)
-      GetFocusDisplay().ScreenOverlay:ClearUIChildren()
+      targetDisplay.ScreenOverlay:ClearUIChildren()
       continue = true
       doSettingsDialog()
+    end
+    signalTable.MH_DisplayPickerClicked = function(caller)
+      targetDisplay.ScreenOverlay:ClearUIChildren()
+      continue = true
+      doDisplayPicker()
     end
     signalTable.MH_IdentifyAllClicked = function(caller) doIdentifyAll() end
     signalTable.MH_BlackoutAllClicked = function(caller) doBlackoutAll() end
@@ -1708,6 +1775,40 @@ doSettingsDialog = function()
     saveSettings(s)
     currentBindIP = nz(s.bindIP, nil) -- so the window this reopens reflects it immediately
     notifyInfo("Settings saved.")
+  end
+
+  return doWindow()
+end
+
+-- Display picker: one button per display index that actually answers
+-- (probeDisplays, Section 8), plus "Auto" to go back to following focus.
+-- Saves to Settings.displayIndex and reopens the window on the new choice.
+doDisplayPicker = function()
+  local s = loadSettings()
+  local curIdx = 0
+  pcall(function() curIdx = GetDisplayIndex(GetFocusDisplay()) end)
+
+  local buttons = { { value = 0, name = "Auto (Follow Focus)" } }
+  for _, idx in ipairs(probeDisplays()) do
+    local label = "Display " .. idx
+    if idx == curIdx then label = label .. " (current)" end
+    buttons[#buttons + 1] = { value = idx, name = label }
+  end
+  buttons[#buttons + 1] = { value = -1, name = "Cancel" }
+
+  local result = MessageBox({
+    title = "MiniHead - Choose Display",
+    message = "Pick which display the MiniHead window should always open on.\n" ..
+      "Currently: " .. (s.displayIndex and s.displayIndex > 0 and ("Display " .. s.displayIndex) or "Auto (follows focus)"),
+    commands = buttons,
+  })
+
+  if result and result.success and result.result and result.result ~= -1 then
+    s.displayIndex = result.result
+    saveSettings(s)
+    notifyInfo(s.displayIndex > 0
+      and ("Window will always open on Display " .. s.displayIndex .. ".")
+      or "Window will open on whichever display currently has focus.")
   end
 
   return doWindow()
