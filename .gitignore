@@ -1,3 +1,8 @@
 .DS_Store
 *.swp
 .claude/
+
+# Internal/dev-facing docs - not needed by end users of the plugin,
+# kept locally for reference but not published in the repo.
+MiniHead-MA3-Plugin-Spec.md
+docs/
